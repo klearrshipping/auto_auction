@@ -7,6 +7,8 @@ Requires: get_market_data.Japan.auction_site_config_JP (credentials from Secret 
 Usage:
   python run_single.py --site Zervtek --maker SUZUKI --model SWIFT
   python run_single.py --site Zervtek --maker SUZUKI --model SWIFT --dry-run
+  python run_single.py --site Zervtek --maker SUZUKI --model SWIFT --dry-run --visible --output
+  (--output saves to data/auction_data/{Make}/{Model}/Japan/ matching sales structure)
 """
 
 import argparse
@@ -20,6 +22,7 @@ sys.path.insert(0, _root)
 
 from get_market_data.Japan.auction_site_config_JP import auction_sites
 from config.manufacturer_config_JM import manufacturer_configs
+from config import config as config_module
 from get_market_data.Japan.auction_data.get_data import truly_optimized_main
 
 
@@ -31,6 +34,9 @@ def main():
     parser.add_argument("--maker", required=True, help="Maker (e.g. SUZUKI)")
     parser.add_argument("--model", required=True, help="Model (e.g. SWIFT)")
     parser.add_argument("--dry-run", action="store_true", help="Extract only, do not save to DB")
+    parser.add_argument("--visible", action="store_true", help="Show browser window (non-headless)")
+    parser.add_argument("--output", nargs="?", const="data/auction_data", default=None,
+                       metavar="DIR", help="Save to data folder (default: data/auction_data, same structure as sales)")
     args = parser.parse_args()
 
     site = args.site
@@ -49,6 +55,16 @@ def main():
         print(f"Model '{model}' not in manufacturer_configs['{maker}'].")
         sys.exit(1)
 
+    # Make browser visible for testing
+    if args.visible:
+        config_module.browser_settings["headless"] = False
+        print("Browser will be visible (headless=False)")
+
+    # Resolve output dir (root for data/auction_data structure, same as sales)
+    output_file = args.output
+    if output_file and not os.path.isabs(output_file):
+        output_file = os.path.join(_root, output_file)
+
     asyncio.run(
         truly_optimized_main(
             dry_run=args.dry_run,
@@ -56,6 +72,7 @@ def main():
             maker_filter=maker,
             model_filter=model,
             limit=1,
+            output_file=output_file,
         )
     )
 

@@ -2,12 +2,15 @@ from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 import asyncio
 import logging
 from typing import Dict, List, Tuple, Optional, Any
+from pathlib import Path
+from collections import defaultdict
 import re
 import traceback
 from datetime import datetime, date
 from abc import ABC, abstractmethod
 import sys
 import os
+import json
 # Add the project root to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -540,17 +543,18 @@ class SearchOptimizer(EnhancedSearchOptimizer):
     def __init__(self):
         super().__init__()
 
-    async def get_cached_mappings(self, page: Page, site_name: str) -> Dict[str, Dict]:
-        """Get cached dropdown mappings for a site"""
+    async def get_cached_mappings(self, page: Page, site_name: str, make_filter: Optional[str] = None) -> Dict[str, Dict]:
+        """Get cached dropdown mappings for a site. When make_filter is set, only fetch that make (avoids cycling through all makes)."""
         if site_name not in self.dropdown_cache:
-            # Removed verbose dropdown mappings logging
-            self.dropdown_cache[site_name] = await self._fetch_all_mappings(page)
-        return self.dropdown_cache[site_name]
+            self.dropdown_cache[site_name] = {'makes': {}, 'models': {}}
+        cache = self.dropdown_cache[site_name]
+        await self._fetch_mappings_for_makes(page, site_name, cache, make_filter)
+        return cache
 
-    async def _fetch_all_mappings(self, page: Page) -> Dict[str, Dict]:
-        """Fetch all dropdown mappings dynamically by selecting each make"""
+    async def _fetch_mappings_for_makes(self, page: Page, site_name: str, cache: Dict, make_filter: Optional[str] = None) -> None:
+        """Fetch dropdown mappings. When make_filter is set, only fetch that make; otherwise fetch all."""
         try:
-            # Get all makes first
+            # Get all make options (lightweight, no selection)
             make_mappings = await page.evaluate('''() => {
                 const makeMappings = {};
                 const makeSelect = document.querySelector('#mrk');
@@ -563,18 +567,23 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                 }
                 return makeMappings;
             }''')
-            
-            # Fetch models for each make dynamically
-            all_model_mappings = {}
-            
-            for make_name, make_value in make_mappings.items():
+            cache['makes'].update(make_mappings)
+
+            # Determine which makes to fetch models for
+            if make_filter:
+                # Case-insensitive: find site's key for requested make
+                make_key = next((k for k in make_mappings if k.upper() == make_filter.upper()), make_filter)
+                makes_to_fetch = [make_key] if make_key not in cache['models'] else []
+            else:
+                makes_to_fetch = [m for m in make_mappings if m not in cache['models']]
+
+            for make_name in makes_to_fetch:
                 try:
-                    # Select this make
+                    make_value = make_mappings[make_name]
                     await page.select_option('#mrk', value=make_value)
                     await page.wait_for_load_state('networkidle', timeout=10000)
                     await asyncio.sleep(1)  # Wait for model dropdown to populate
-                    
-                    # Get models for this make
+
                     model_mappings = await page.evaluate('''() => {
                         const modelMappings = {};
                         const modelSelect = document.querySelector('select[name="mdl[]"]');
@@ -587,25 +596,20 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                         }
                         return modelMappings;
                     }''')
-                    
-                    # Store models for this make
-                    all_model_mappings[make_name] = model_mappings
-                    
+                    cache['models'][make_name] = model_mappings
+
                 except Exception as e:
                     self.logger.warning(f"Error fetching models for make {make_name}: {e}")
-                    all_model_mappings[make_name] = {}
-            
-            return {'makes': make_mappings, 'models': all_model_mappings}
-            
+                    cache['models'][make_name] = {}
+
         except Exception as e:
             self.logger.error(f"Error fetching dropdown mappings: {e}")
-            return {'makes': {}, 'models': {}}
 
     async def search_make_all_models(self, page: Page, site_name: str, make: str, models: List[str], min_year: int = None) -> List[Dict]:
-        """Search for specific models assigned to this site (should be only one model per site)"""
+        """Search for specific make+model combination(s). Only fetches dropdown mappings for the make being searched."""
         try:
-            # Get cached mappings for this site
-            make_mappings = await self.get_cached_mappings(page, site_name)
+            # Get cached mappings - pass make so we only fetch this make's models, not all makes
+            make_mappings = await self.get_cached_mappings(page, site_name, make_filter=make)
             make_value = make_mappings['makes'].get(make)
             
             if not make_value:
@@ -666,7 +670,6 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     if search_clicked:
                         await page.wait_for_load_state('networkidle')
                         await asyncio.sleep(1)
-                        
                         # Extract listings for this specific model
                         listings = await self._extract_listings_fast(page, site_name, make, model)
                         
@@ -690,7 +693,7 @@ class SearchOptimizer(EnhancedSearchOptimizer):
         """Debug helper to capture page content when extraction fails"""
         try:
             current_url = page.url
-            print(f"🔍 Debugging page content for {make} {model} at {current_url}")
+            print(f"DEBUG page content for {make} {model} at {current_url}")
             
             # Get all table structures
             tables_info = await page.evaluate('''() => {
@@ -734,13 +737,14 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                 return tableInfo;
             }''')
             
-            print(f"📋 Found {len(tables_info)} tables on page")
-            for table_idx, table in enumerate(tables_info):
-                print(f"  Table {table_idx}: {len(table['rows'])} rows")
-                for row_idx, row in enumerate(table['rows'][:3]):  # Show first 3 rows
-                    print(f"    Row {row_idx}: {len(row['cells'])} cells")
-                    for cell in row['cells'][:5]:  # Show first 5 cells
-                        print(f"      Cell {cell['index']}: id='{cell['id']}', class='{cell['class']}', text='{cell['text']}'")
+            if tables_info:
+                print(f"Found {len(tables_info)} tables on page")
+                for table_idx, table in enumerate(tables_info):
+                    print(f"  Table {table_idx}: {len(table['rows'])} rows")
+                    for row_idx, row in enumerate(table['rows'][:3]):  # Show first 3 rows
+                        print(f"    Row {row_idx}: {len(row['cells'])} cells")
+                        for cell in row['cells'][:5]:  # Show first 5 cells
+                            print(f"      Cell {cell['index']}: id='{cell['id']}', class='{cell['class']}', text='{cell['text']}'")
             
             # Also check for any div-based content that might contain results
             div_content = await page.evaluate('''() => {
@@ -762,28 +766,32 @@ class SearchOptimizer(EnhancedSearchOptimizer):
             }''')
             
             if div_content:
-                print(f"📋 Found {len(div_content)} relevant divs:")
+                print(f"Found {len(div_content)} relevant divs:")
                 for div in div_content:
                     print(f"  Div {div['index']}: class='{div['class']}', text='{div['text']}'")
                         
         except Exception as e:
-            print(f"❌ Error debugging page content: {e}")
+            print(f"Error debugging page content: {e}")
             self.logger.error(f"Error debugging page content: {e}")
 
     async def _extract_listings_fast(self, page: Page, site_name: str, make: str, model: str) -> List[Dict]:
         """Fast listing extraction with correct selectors for the actual HTML structure"""
         try:
-            # Log the current URL for debugging (file only)
-            current_url = page.url
-            # Removed verbose processing logging
-            
-            # Wait longer and check for different loading states
+            # Wait for results to load
             try:
                 await page.wait_for_load_state('networkidle', timeout=15000)
-                await asyncio.sleep(2)  # Additional wait for dynamic content
-            except:
-                print(f"⚠️  Page load timeout for {make} {model}, continuing...")
-            
+                await asyncio.sleep(2)
+            except Exception:
+                pass
+
+            # Set results per page to 100 (site defaults to 50); setvs submits form and navigates
+            try:
+                async with page.expect_navigation(wait_until='networkidle', timeout=15000):
+                    await page.evaluate("setvs(100)")
+                await asyncio.sleep(1)
+            except Exception:
+                pass
+
             # Check what's actually on the page
             page_info = await page.evaluate('''() => {
                 const info = {
@@ -800,27 +808,20 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                 return info;
             }''')
             
-            # Only log table info if there are issues
-            # Removed verbose "No results found" logging
-            
             # Wait for results table to load
             try:
                 await page.wait_for_selector('tr.ColorGreed1, tr.ColorGreed2', timeout=10000)
-            except:
-                if page_info['tableCount'] == 0:
-                    return []
-            
+            except Exception:
+                pass
+
             # Target the specific ColorGreed rows using exact class names
             rows = await page.query_selector_all('tr.ColorGreed1, tr.ColorGreed2')
-            
             if not rows:
                 return []
-            
-            # Removed verbose processing count output
-            
+
             listings = []
             current_date = datetime.now().date()
-            
+
             for row_index, row in enumerate(rows, 1):
                 try:
                     # Extract data using the specific ID pattern
@@ -867,7 +868,7 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     # Check if we have essential data
                     if not listing_data['bid_number'] or not listing_data['bid_number']['text']:
                         continue
-                    
+
                     # Check if result is available
                     result_text = listing_data['result']['text'].lower() if listing_data['result'] else ''
                     if 'available' not in result_text:
@@ -933,18 +934,6 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     else:
                         date_formatted = 'N/A'
                     
-                    # Debug: Print extracted data for first few records
-                    if len(listings) < 3:  # Only debug first few records
-                        print(f"🔍 DEBUG - Extracted data for {make} {model}:")
-                        print(f"  Lot: {lot_number}")
-                        print(f"  Auction: {auction_house}")
-                        print(f"  Grade: {grade}")
-                        print(f"  Color: {color}")
-                        print(f"  Result: {status}")
-                        print(f"  Scores: {inspection_score}")
-                        print(f"  Lot URL: {lot_url}")
-                        print(f"  Equipment: {equipment}")
-                    
                     # Build listing record for database storage
                     year_num = self._extract_number(year) if year != 'N/A' else 0
                     mileage_num = mileage_num if 'mileage_num' in locals() else 0
@@ -977,7 +966,6 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     continue
             
             if listings:
-                # Removed verbose extraction complete messages
                 self.logger.info(f"Extracted {len(listings)} listings for {make} {model} from {site_name}")
             
             # ADD DEDUPLICATION HERE - before returning listings:
@@ -1301,13 +1289,17 @@ class SimplifiedSiteProcessor(Base):
                     continue
                 # Get list of model names from the dictionary keys
                 model_names = list(models.keys())
-                # Distribute models across sites using round-robin
-                site_models = [
-                    model for i, model in enumerate(model_names)
-                    if i % len(sites) == site_index
-                ]
-                if self.model_filter:
-                    site_models = [m for m in site_models if m.upper() == self.model_filter.upper()]
+                # When site_filter is set (e.g. run_single), use requested model(s) for that site
+                # Otherwise distribute models across sites using round-robin
+                if self.site_filter and self.model_filter:
+                    site_models = [m for m in model_names if m.upper() == self.model_filter.upper()]
+                else:
+                    site_models = [
+                        model for i, model in enumerate(model_names)
+                        if i % len(sites) == site_index
+                    ]
+                    if self.model_filter:
+                        site_models = [m for m in site_models if m.upper() == self.model_filter.upper()]
                 if not site_models:
                     continue
 
@@ -1418,11 +1410,13 @@ class SimplifiedSiteProcessor(Base):
 
 class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
     """Site processor with proper staging workflow for duplicate elimination"""
-    
-    def __init__(self, dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0):
+
+    def __init__(self, dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0, output_file=None):
         super().__init__(dry_run=dry_run, site_filter=site_filter, maker_filter=maker_filter,
                          model_filter=model_filter, limit=limit)
         self.db_handler = DatabaseHandler()
+        self.output_file = output_file
+        self.collected_listings = []  # For JSON output when output_file + dry_run
         pool_size = browser_settings.get("browser_pool_size", 2)
         self.browser_pool = SafeMemoryOptimizedBrowserPool(pool_size=pool_size)
         self.direct_db = TrulyDirectDatabaseHandler(self.db_handler)  # Use staging workflow
@@ -1461,6 +1455,8 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
                         if self.dry_run:
                             print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN (would save {len(listings)})")
                             total_listings += len(listings)
+                            if getattr(self, 'output_file', None):
+                                self.collected_listings.extend(listings)
                         else:
                             # Save using direct database handler
                             saved = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
@@ -1590,16 +1586,69 @@ async def optimized_main():
         cleaned = processor.db_handler.cleanup_staging()
         print(f"Cleaned up {cleaned} old staging records")
         
-        print(f"\n🎉 FULLY OPTIMIZED PROCESSING COMPLETE!")
-        print(f"⚡ Processing speed: {total_listings/duration:.1f} listings/second")
+        print(f"\nFULLY OPTIMIZED PROCESSING COMPLETE!")
+        print(f"Processing speed: {total_listings/duration:.1f} listings/second")
         
     except Exception as e:
-        print(f"❌ Fatal error: {e}")
+        print(f"Fatal error: {e}")
         raise
     finally:
         await processor.cleanup()
 
-async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0):
+def save_auction_listings(
+    results: List[Dict],
+    make: str,
+    model: str,
+    site_name: str,
+    root_path: Path,
+    extraction_date: str,
+) -> Optional[Path]:
+    """
+    Save auction listings to root_path / {Make} / {Model} / Japan / {Make}_{Model}_{Site}_{extraction_date}.json.
+    Matches sales data structure: data/sales_data/{Make}/{Model}/Japan/{Make}_{Model}_{dates}.json
+    Returns path written, or None if not saved.
+    """
+    if not results or not make or not model:
+        return None
+    make_title = (make or "").strip().title()
+    model_title = (model or "").strip().title()
+    site_safe = (site_name or "").replace(" ", "_")
+    out_dir = root_path / make_title / model_title / "Japan"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_name = f"{make_title}_{model_title}_{site_safe}_{extraction_date}.json"
+    out_file = out_dir / out_name
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    return out_file
+
+
+def save_collected_auction_listings(
+    collected_listings: List[Dict],
+    root_path: Path,
+    extraction_date: str,
+) -> List[Path]:
+    """
+    Group collected listings by (site_name, make, model) and save each group
+    to the standard path structure. Returns list of paths written.
+    """
+    if not collected_listings:
+        return []
+    grouped: Dict[tuple, List[Dict]] = defaultdict(list)
+    for r in collected_listings:
+        key = (r.get("site_name") or "", r.get("make") or "", r.get("model") or "")
+        grouped[key].append(r)
+    paths = []
+    for (site_name, make, model), listings in grouped.items():
+        if site_name and make and model:
+            p = save_auction_listings(
+                listings, make, model, site_name, root_path, extraction_date
+            )
+            if p:
+                paths.append(p)
+    return paths
+
+
+async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0, output_file=None):
     """Optimized main with proper staging workflow for duplicate elimination.
     Args:
         dry_run: If True, extract only, do not save to DB.
@@ -1607,11 +1656,14 @@ async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=Non
         maker_filter: Process only this maker (e.g. 'TOYOTA').
         model_filter: Process only this model (e.g. 'CAMRY').
         limit: Max number of make/model jobs (0 = all).
+        output_file: If set (with dry_run), save extracted listings to this JSON file.
     """
     print("Starting Auction Data Collection")
     print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     if dry_run:
         print("DRY-RUN: No data will be saved to database")
+    if output_file:
+        print(f"Output dir: {output_file}")
     if site_filter:
         print(f"Site filter: {site_filter}")
     if maker_filter:
@@ -1625,7 +1677,7 @@ async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=Non
 
     processor = TrulyOptimizedSiteProcessor(
         dry_run=dry_run, site_filter=site_filter, maker_filter=maker_filter,
-        model_filter=model_filter, limit=limit
+        model_filter=model_filter, limit=limit, output_file=output_file
     )
 
     try:
@@ -1647,6 +1699,16 @@ async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=Non
         print(f"Processing time: {duration/60:.1f} minutes")
         print(f"Speed: {rate:.1f} vehicles/minute")
         print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Save extracted listings to data folder (same structure as sales: Make/Model/Japan/Make_Model_Site_date.json)
+        if output_file and getattr(processor, 'collected_listings', None):
+            root_path = Path(output_file)
+            extraction_date = date.today().isoformat()
+            paths = save_collected_auction_listings(
+                processor.collected_listings, root_path, extraction_date
+            )
+            for p in paths:
+                print(f"Saved to {p}")
 
         if not dry_run:
             # Process staging data to main with duplicate elimination
