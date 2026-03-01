@@ -1,0 +1,1 @@
+# Japan auction data

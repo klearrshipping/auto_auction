@@ -1,0 +1,8 @@
+.env
+.env.local
+config/secrets.json
+*.pyc
+__pycache__/
+data/
+.venv/
+logs/

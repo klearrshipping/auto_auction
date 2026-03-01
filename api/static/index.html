@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Valuation Market Monitor</title>
+    <style>
+        :root {
+            --bg: #0b0d11;
+            --surface: #161a23;
+            --border: #242936;
+            --text: #f1f5f9;
+            --muted: #94a3b8;
+            --accent: #3b82f6;
+            --highlight: #8b5cf6;
+            --success: #10b981;
+            --header-bg: #1e293b;
+            --warning: #f59e0b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            min-height: 100vh;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .brand {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .brand h1 {
+            font-size: 1.4rem;
+            font-weight: 800;
+            background: linear-gradient(to right, var(--accent), var(--highlight));
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.02em;
+        }
+
+        .brand p {
+            font-size: 0.8rem;
+            color: var(--muted);
+            margin-top: 2px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .btn {
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover:not(:disabled) {
+            background: var(--border);
+            border-color: var(--accent);
+        }
+
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #2563eb;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #0f172a;
+            border: 1px solid var(--border);
+            padding: 6px 14px;
+            border-radius: 99px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--muted);
+        }
+
+        .table-wrap {
+            background: var(--surface);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            overflow: auto;
+            flex-grow: 1;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.8rem;
+        }
+
+        thead {
+            position: sticky;
+            top: 0;
+            background: var(--header-bg);
+            z-index: 10;
+        }
+
+        th {
+            padding: 14px 16px;
+            color: #cbd5e1;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.6rem;
+            letter-spacing: 0.05em;
+            border-bottom: 2px solid var(--border);
+            white-space: nowrap;
+        }
+
+        td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            color: #e2e8f0;
+            white-space: nowrap;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .price-cell {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 700;
+            color: #60a5fa;
+        }
+
+        .last-sold-cell {
+            color: var(--warning);
+            font-weight: 700;
+        }
+
+        .badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .badge-strong {
+            background: #064e3b;
+            color: #34d399;
+        }
+
+        .badge-light {
+            background: #78350f;
+            color: #fbbf24;
+        }
+
+        .badge-thin {
+            background: #450a0a;
+            color: #f87171;
+        }
+
+        footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 10px;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .page-info {
+            font-size: 0.85rem;
+            color: var(--muted);
+            font-weight: 500;
+        }
+
+        #loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(11, 13, 17, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            visibility: hidden;
+            opacity: 0;
+            transition: 0.2s;
+        }
+
+        #loading-overlay.visible {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+    </div>
+
+    <header>
+        <div class="brand">
+            <h1>Market Monitor</h1>
+            <p>Paginated Auction Valuations</p>
+        </div>
+        <div class="controls">
+            <div class="status-badge">
+                <span id="total-records">0</span> Buckets Total
+            </div>
+            <button class="btn btn-primary" onclick="loadPage(1)">Refresh</button>
+        </div>
+    </header>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Vehicle Configuration</th>
+                    <th>Score</th>
+                    <th>Mileage</th>
+                    <th>Fair Value</th>
+                    <th>Mean</th>
+                    <th>Median</th>
+                    <th>Price Band</th>
+                    <th>Last Sold</th>
+                    <th>Conf.</th>
+                    <th>Sales</th>
+                    <th>Updated</th>
+                </tr>
+            </thead>
+            <tbody id="monitor-body">
+                <!-- Data populated here -->
+            </tbody>
+        </table>
+    </div>
+
+    <footer>
+        <div class="page-info">
+            Showing <span id="range-start">0</span>-<span id="range-end">0</span> of <span id="total-count">0</span>
+        </div>
+        <div class="pagination">
+            <button id="prev-btn" class="btn" onclick="prevPage()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M15 18l-6-6 6-6" />
+                </svg>
+                Prev
+            </button>
+            <span class="page-info">Page <span id="current-page">1</span> of <span id="total-pages">1</span></span>
+            <button id="next-btn" class="btn" onclick="nextPage()">
+                Next
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 18l6-6-6-6" />
+                </svg>
+            </button>
+        </div>
+    </footer>
+
+    <script>
+        let currentPage = 1;
+        let totalPages = 1;
+        const limit = 50;
+
+        function showLoading(show) {
+            document.getElementById('loading-overlay').className = show ? 'visible' : '';
+        }
+
+        function fmt(val) {
+            if (val === null || val === undefined) return 'N/A';
+            return '¥' + Math.round(val).toLocaleString();
+        }
+
+        async function loadPage(page) {
+            showLoading(true);
+            try {
+                const response = await fetch(`/api/buckets?page=${page}&limit=${limit}`);
+                const result = await response.json();
+
+                currentPage = result.page;
+                totalPages = Math.ceil(result.total / limit);
+
+                updateUI(result);
+            } catch (e) {
+                console.error('Fetch error:', e);
+                alert('Feat failure. Check console.');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function updateUI(result) {
+            const tbody = document.getElementById('monitor-body');
+            tbody.innerHTML = '';
+
+            result.data.forEach(data => {
+                const row = document.createElement('tr');
+                const priceRange = data.price_range_str ? '¥' + data.price_range_str : 'N/A';
+                const lastSold = data.last_sold_price ? fmt(data.last_sold_price) : 'No Sales';
+                const lastUpdated = data.last_updated && data.last_updated.includes('T')
+                    ? data.last_updated.split('T')[1].split('.')[0]
+                    : data.last_updated;
+
+                row.innerHTML = `
+                    <td style="font-weight: 500;">${data.vehicle}</td>
+                    <td><span style="color:var(--muted)">${data.score_band}</span></td>
+                    <td><span style="color:var(--muted)">${data.mileage_band}</span></td>
+                    <td class="price-cell">${fmt(data.fv_price)}</td>
+                    <td style="color:var(--muted)">${fmt(data.mean_price)}</td>
+                    <td style="color:var(--muted)">${fmt(data.median_price)}</td>
+                    <td style="font-size: 0.7rem; color: var(--muted)">${priceRange}</td>
+                    <td class="last-sold-cell">${lastSold}</td>
+                    <td><span class="badge badge-${data.confidence_tier.toLowerCase()}">${data.confidence_tier[0]}</span></td>
+                    <td>${data.comparable_count}</td>
+                    <td style="color: var(--muted); font-size: 0.7rem;">${lastUpdated}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            // Update stats
+            document.getElementById('total-records').textContent = result.total.toLocaleString();
+            document.getElementById('total-count').textContent = result.total.toLocaleString();
+            document.getElementById('current-page').textContent = currentPage;
+            document.getElementById('total-pages').textContent = totalPages;
+
+            const start = ((currentPage - 1) * limit) + 1;
+            const end = Math.min(currentPage * limit, result.total);
+            document.getElementById('range-start').textContent = start.toLocaleString();
+            document.getElementById('range-end').textContent = end.toLocaleString();
+
+            // Button states
+            document.getElementById('prev-btn').disabled = currentPage <= 1;
+            document.getElementById('next-btn').disabled = currentPage >= totalPages;
+        }
+
+        function nextPage() {
+            if (currentPage < totalPages) loadPage(currentPage + 1);
+        }
+
+        function prevPage() {
+            if (currentPage > 1) loadPage(currentPage - 1);
+        }
+
+        window.onload = () => loadPage(1);
+    </script>
+</body>
+
+</html>
