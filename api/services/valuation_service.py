@@ -6,10 +6,16 @@ from dotenv import load_dotenv
 
 # --- Paths ---
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR    = os.path.abspath(os.path.join(SERVICE_DIR, '..', '..'))
-ENV_PATH    = os.path.join(ROOT_DIR, 'tools', 'aggregate_sales', '.env')
+ROOT_DIR = os.path.abspath(os.path.join(SERVICE_DIR, "..", ".."))
+ENV_PATH = os.path.join(ROOT_DIR, "tools", "aggregate_sales", ".env")
 
 load_dotenv(ENV_PATH)
+
+# Shared band definitions
+import sys
+sys.path.insert(0, ROOT_DIR)
+from config.sales_bands import get_score_band, get_mileage_band
+
 
 class ValuationService:
     def __init__(self):
@@ -22,26 +28,10 @@ class ValuationService:
         self._last_sold_cache = {} # Cache for repetitive lookups during a stream
 
     def _get_score_band(self, score: str):
-        s = str(score).strip().upper()
-        if s == 'R': return 'R'
-        if s == 'S': return 'S'
-        if s == '5': return '5'
-        try:
-            n = float(s)
-            if 3.0 <= n <= 3.5: return '3-3.5'
-            if 4.0 <= n <= 4.5: return '4-4.5'
-        except ValueError:
-            pass
-        return None
+        return get_score_band(score)
 
     def _get_mileage_band(self, mileage: int):
-        if mileage <= 30000:    return '0-30k'
-        elif mileage <= 60000:  return '30k-60k'
-        elif mileage <= 90000:  return '60k-90k'
-        elif mileage <= 120000: return '90k-120k'
-        elif mileage <= 150000: return '120k-150k'
-        elif mileage <= 200000: return '150k-200k'
-        else:                   return '200k+'
+        return get_mileage_band(mileage)
 
     async def _get_last_sold_price(self, make, model, year, model_type):
         """Looks up the most recent hammer price for this configuration (with caching)"""
@@ -88,12 +78,15 @@ class ValuationService:
         elif not fv:
             fv = row.get('mean_price', 0)
 
-        range_low   = fv - (iqr // 2) if iqr else min_p
-        range_high  = fv + (iqr // 2) if iqr else max_p
-        
-        last_sold = await self._get_last_sold_price(
-            row['make'], row['model'], row['year'], row['model_type']
-        )
+        range_low = fv - (iqr // 2) if iqr else min_p
+        range_high = fv + (iqr // 2) if iqr else max_p
+
+        # Use pre-computed last_sold from bucket when available (avoids N+1 lookups)
+        last_sold = row.get("last_sold_price")
+        if last_sold is None:
+            last_sold = await self._get_last_sold_price(
+                row["make"], row["model"], row["year"], row["model_type"]
+            )
 
         vehicle_name = req_info if req_info else f"{row.get('year')} {row.get('make')} {row.get('model')} {row.get('model_type')}"
 
@@ -110,6 +103,8 @@ class ValuationService:
             "median_price":     median,
             "last_sold_price":  last_sold,
             "market_spread_pct": row.get('price_spread_pct'),
+            "std_dev":          row.get('std_dev'),
+            "cv_pct":           row.get('cv_pct'),
             "confidence_tier":  tier.upper(),
             "comparable_count": row.get('comparable_count', 0),
             "min_price":        min_p,

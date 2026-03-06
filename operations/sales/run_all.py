@@ -434,7 +434,7 @@ async def main():
 
     log("=" * 60)
 
-    # Trigger Sync and update status
+    # Trigger sync (cloud_sync runs bucket analysis after every upload)
     if t["jobs_completed"] > 0:
         if trigger_supabase_sync():
             if auto_mode:

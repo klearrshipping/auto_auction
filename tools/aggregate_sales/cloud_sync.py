@@ -1,6 +1,8 @@
 import os
+import sys
 import json
 import re
+import subprocess
 import argparse
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Set
@@ -94,7 +96,7 @@ def scan_for_unsynced_files(processed_cache: Set[str]) -> List[Tuple[str, str]]:
             continue
             
         for file in files:
-            if file.endswith('.json') and not file.endswith('_urls.json'):
+            if file.endswith('.json') and not file.endswith('_urls.json') and not file.endswith('_lot_urls.json') and not file.endswith('_lot_urls_done.json'):
                 abs_path = os.path.join(root, file)
                 rel_path = os.path.relpath(abs_path, PROJECT_ROOT)
                 
@@ -108,9 +110,9 @@ def clean_file_data(abs_path: str, rel_path: str) -> List[Dict]:
         with open(abs_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             
-        if not data:
+        if not data or not isinstance(data, list):
             return []
-            
+
         cleaned_records = []
         for item in data:
             mileage = clean_mileage(item.get('mileage'))
@@ -150,10 +152,28 @@ def clean_file_data(abs_path: str, rel_path: str) -> List[Dict]:
         print(f"Error reading {rel_path}: {e}")
         return []
 
+def trigger_buckets_rebuild():
+    """Rebuild japan_sales_buckets after upload. Runs preanalysis."""
+    preanalysis = os.path.join(PROJECT_ROOT, "market_analysis", "Japan", "preanalysis.py")
+    if not os.path.isfile(preanalysis):
+        print("Warning: preanalysis.py not found, skipping buckets rebuild.")
+        return False
+    cmd = [sys.executable, "-u", preanalysis]
+    print("Triggering bucket analysis...")
+    try:
+        subprocess.run(cmd, check=True, cwd=PROJECT_ROOT)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Bucket analysis failed: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description='Clean raw JSONs and push to Supabase API directly.')
-    parser.add_argument('--batch-size', type=int, default=1000, 
+    parser.add_argument('--batch-size', type=int, default=1000,
                         help='Number of records to push per API request.')
+    parser.add_argument('--skip-buckets', action='store_true',
+                        help='Skip bucket analysis after upload.')
     args = parser.parse_args()
 
     try:
@@ -227,7 +247,11 @@ def main():
                 print(f"Synchronized {total_pushed} records to Supabase...")
                 
         print(f"Finished successfully. Total records inserted/updated: {total_pushed}")
-                
+
+        # Bucket analysis runs after every upload so valuations stay current
+        if total_pushed > 0 and not args.skip_buckets:
+            trigger_buckets_rebuild()
+
     except ValueError as ve:
         print(ve)
     except Exception as e:

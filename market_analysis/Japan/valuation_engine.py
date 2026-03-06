@@ -8,44 +8,22 @@ Usage:
 """
 
 import os
+import sys
 import argparse
 from supabase import create_client, ClientOptions
 from dotenv import load_dotenv
 
 # --- Load credentials ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(SCRIPT_DIR, '..', '..', 'tools', 'aggregate_sales', '.env')
+ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
+sys.path.insert(0, ROOT)
+
+ENV_PATH = os.path.join(ROOT, "tools", "aggregate_sales", ".env")
 load_dotenv(ENV_PATH)
-options = ClientOptions(schema='sales_data')
-supabase = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_KEY'), options=options)
+options = ClientOptions(schema="sales_data")
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"), options=options)
 
-# --- Band Definitions ---
-def get_score_band(score):
-    if not score: return None
-    s = str(score).strip().upper()
-    if s == 'R': return 'R'
-    if s == 'S': return 'S'
-    if s == '5': return '5'
-    try:
-        n = float(s)
-        if 3.0 <= n <= 3.5: return '3-3.5'
-        if 4.0 <= n <= 4.5: return '4-4.5'
-    except ValueError:
-        pass
-    return None
-
-def get_mileage_band(mileage):
-    try:
-        m = int(mileage)
-        if m <= 30000:    return '0-30k'
-        elif m <= 60000:  return '30k-60k'
-        elif m <= 90000:  return '60k-90k'
-        elif m <= 120000: return '90k-120k'
-        elif m <= 150000: return '120k-150k'
-        elif m <= 200000: return '150k-200k'
-        else:             return '200k+'
-    except (ValueError, TypeError):
-        return None
+from config.sales_bands import get_score_band, get_mileage_band
 
 def format_yen(value):
     return f"¥{value:,.0f}"

@@ -48,8 +48,8 @@ async def valuate(req: ValuationRequest):
 
     if not res.data:
         raise HTTPException(status_code=404, detail="No data found")
-    
-    return service._calculate_valuation(res.data[0])
+
+    return await service._calculate_valuation(res.data[0])
 
 @app.post("/api/stream-valuate")
 async def stream_valuate(req: ValuationRequest):

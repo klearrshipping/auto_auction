@@ -11,15 +11,35 @@ from abc import ABC, abstractmethod
 import sys
 import os
 import json
+
+# Force UTF-8 for Windows (avoids charmap errors on scraped content with emoji)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Add the project root to Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+_project_root = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(_project_root))
 
 from get_market_data.Japan.auction_site_config_JP import auction_sites
 from config.manufacturer_config_JM import manufacturer_configs
 from config.config import logging_config, browser_settings
-from config.db import DatabaseHandler
+
+try:
+    from operations.auction.utils.uid_utils import listing_uid
+except ImportError:
+    listing_uid = None
 import os
 import time
+
+def _log_error_with_tb(logger, msg: str, exc: Exception):
+    """Log error message with full traceback for debugging."""
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    logger.error(f"{msg}\n{''.join(tb)}")
+
 
 def setup_listing_logging():
     """Setup dedicated logging for listing process with better console output"""
@@ -37,9 +57,10 @@ def setup_listing_logging():
     # Clear existing handlers
     logger.handlers.clear()
     
-    # File handler
+    # File handler (UTF-8 to handle scraped content with emoji)
     file_handler = logging.FileHandler(
-        os.path.join(log_dir, logging_config['files']['listing'])
+        os.path.join(log_dir, logging_config['files']['listing']),
+        encoding='utf-8'
     )
     file_handler.setFormatter(logging.Formatter(logging_config['format']))
     
@@ -60,273 +81,28 @@ class Base(ABC):
         self.setup_logging()
 
     def setup_logging(self):
-        logging.basicConfig(
+        kwargs = dict(
             level=logging_config['level'],
             format=logging_config['format'],
-            filename=f"logs/{logging_config['files']['main']}"
+            filename=f"logs/{logging_config['files']['main']}",
         )
+        if sys.version_info >= (3, 9):
+            kwargs['encoding'] = 'utf-8'
+        logging.basicConfig(**kwargs)
 
-class DirectDatabaseHandler(Base):
-    """Direct database operations without staging overhead"""
-    
-    def __init__(self, db_handler: DatabaseHandler):
-        super().__init__()
-        self.db_handler = db_handler
-    
-    async def bulk_upsert_vehicles_direct(self, listings: List[Dict]) -> int:
-        """Direct bulk upsert to vehicles table"""
-        if not listings:
-            # Removed verbose no listings message
-            return 0
-            
-        try:
-            # Deduplicate listings by site_name and lot_number
-            unique_listings = {}
-            for listing in listings:
-                key = (listing.get('site_name'), listing.get('lot_number'))
-                if key not in unique_listings:
-                    unique_listings[key] = listing
-            
-            deduplicated_listings = list(unique_listings.values())
-            
-            # Prepare data for bulk insert
-            values = []
-            for listing in deduplicated_listings:
-                values.append((
-                    listing.get('site_name'),
-                    listing.get('lot_number'),
-                    listing.get('make'),
-                    listing.get('model'),
-                    listing.get('year'),
-                    listing.get('mileage'),
-                    listing.get('start_price'),
-                    listing.get('end_price'),
-                    listing.get('grade'),
-                    listing.get('color'),
-                    listing.get('result'),
-                    listing.get('scores'),
-                    listing.get('url'),
-                    listing.get('lot_link'),
-                    listing.get('auction'),
-                    listing.get('search_date')
-                ))
-            
-            # Use batch processing for maximum speed
-            total_inserted = 0
-            batch_size = 1000
-            
-            for i in range(0, len(values), batch_size):
-                batch = values[i:i + batch_size]
-                
-                # Use existing database handler but with optimized approach
-                batch_listings = []
-                for value in batch:
-                    batch_listings.append({
-                        'site_name': value[0],
-                        'lot_number': value[1],
-                        'make': value[2],
-                        'model': value[3],
-                        'year': value[4],
-                        'mileage': value[5],
-                        'start_price': value[6],
-                        'end_price': value[7],
-                        'grade': value[8],
-                        'color': value[9],
-                        'result': value[10],
-                        'scores': value[11],
-                        'url': value[12],
-                        'lot_link': value[13],
-                        'auction': value[14],
-                        'search_date': value[15]
-                    })
-                
-                # Direct insertion to avoid staging overhead
-                staged, processed, duplicates = await self.db_handler.bulk_insert_staging_concurrent(
-                    batch_listings[0]['site_name'] if batch_listings else 'unknown',
-                    batch_listings
-                )
-                
-                # Immediately process staging to main
-                processed_count, duplicate_count = self.db_handler.process_staging_to_main()
-                total_inserted += processed_count
-                
-                self.logger.info(f"Direct batch insert: {processed_count} records, {duplicate_count} duplicates")
-            
-            return total_inserted
-            
-        except Exception as e:
-            self.logger.error(f"Error in direct bulk upsert: {e}")
-            return 0
+class _NoDbPlaceholder:
+    """No database - extraction saves to JSON only."""
 
-    async def execute_batch(self, query: str, batch: List[Tuple]) -> List:
-        """Execute batch query - simplified version using existing handler"""
-        try:
-            # This is a simplified version - the actual PostgreSQL COPY would be implemented
-            # in the database handler itself, here we're using the existing infrastructure
-            return batch  # Return batch as successful for counting
-        except Exception as e:
-            self.logger.error(f"Error executing batch: {e}")
-            return []
-
-class TrulyDirectDatabaseHandler(Base):
-    """Actually direct database operations - no staging"""
-    
-    def __init__(self, db_handler: DatabaseHandler):
-        super().__init__()
-        self.db_handler = db_handler
-    
     async def bulk_upsert_vehicles_truly_direct(self, listings: List[Dict]) -> int:
-        """Fixed implementation ensuring perfect 1:1 correspondence"""
+        """No-op: return count for display. Data is saved to JSON via output_file."""
         if not listings:
             return 0
-            
-        try:
-            # Deduplicate listings by site_name and lot_number
-            unique_listings = {}
-            for listing in listings:
-                key = (listing.get("site_name"), listing.get("lot_number"))
-                if key not in unique_listings:
-                    unique_listings[key] = listing
-            
-            deduplicated_listings = list(unique_listings.values())
-            self.logger.info(f"Deduplicated {len(listings)} listings to {len(deduplicated_listings)} unique records")
-            
-            # Process each vehicle individually to ensure atomicity
-            total_processed = 0
-            
-            for listing in deduplicated_listings:
-                vehicle_record = {
-                    'site_name': listing.get('site_name'),
-                    'lot_number': listing.get('lot_number'),
-                    'make': listing.get('make'),
-                    'model': listing.get('model'),
-                    'year': listing.get('year'),
-                    'mileage': listing.get('mileage'),
-                    'start_price': listing.get('start_price'),
-                    'end_price': listing.get('end_price'),
-                    'grade': listing.get('grade'),
-                    'color': listing.get('color'),
-                    'result': listing.get('result'),
-                    'scores': listing.get('scores'),
-                    'lot_link': listing.get('lot_link'),
-                    'auction': listing.get('auction'),
-                    'search_date': listing.get('search_date'),
-                    'created_at': datetime.now().isoformat()
-                }
-                
-                try:
-                    # Step 1: Upsert vehicle
-                    vehicle_result = self.db_handler.supabase_client.table("vehicles").upsert(
-                        [vehicle_record],
-                        on_conflict="site_name,lot_number"
-                    ).execute()
-                    
-                    if vehicle_result.data:
-                        vehicle = vehicle_result.data[0]
-                        
-                        # Step 2: Create URL record if lot_link exists
-                        if vehicle.get('lot_link'):
-                            url_record = {
-                                'site_name': vehicle['site_name'],
-                                'url': vehicle['lot_link'],
-                                'vehicle_id': vehicle['id'],
-                                'processed': False,
-                                'created_at': datetime.now().isoformat()
-                            }
-                            
-                            # Check if a processed_urls record already exists for this vehicle
-                            existing_url_result = self.db_handler.supabase_client.table("processed_urls").select("id, url").eq("vehicle_id", vehicle['id']).execute()
-                            
-                            if existing_url_result.data:
-                                # Update existing record if URL has changed
-                                existing_url = existing_url_result.data[0]
-                                if existing_url['url'] != vehicle['lot_link']:
-                                    # URL has changed, update the record
-                                    self.db_handler.supabase_client.table("processed_urls").update({
-                                        'url': vehicle['lot_link'],
-                                        'processed': False  # Reset processing status for new URL
-                                    }).eq("vehicle_id", vehicle['id']).execute()
-                                    self.logger.info(f"Updated URL for vehicle {vehicle['id']}: {existing_url['url']} → {vehicle['lot_link']}")
-                                # If URL hasn't changed, no action needed
-                            else:
-                                # Create new processed_urls record
-                                self.db_handler.supabase_client.table("processed_urls").upsert(
-                                    [url_record],
-                                    on_conflict="site_name,url"
-                                ).execute()
-                        
-                        total_processed += 1
-                        
-                except Exception as e:
-                    self.logger.error(f"Error processing vehicle {listing.get('lot_number')}: {e}")
-                    continue
-            
-            self.logger.info(f"Successfully processed {total_processed} vehicles with 1:1 correspondence")
-            return total_processed
-            
-        except Exception as e:
-            self.logger.error(f"Error in truly direct bulk upsert: {e}")
-            return 0
-    
-    async def _execute_direct_batch(self, query: str, batch: List[Tuple]) -> List:
-        """Execute direct batch query using Supabase client"""
-        try:
-            # Convert batch tuples to dictionaries for Supabase
-            batch_data = []
-            for row in batch:
-                # This is a simplified approach - in practice, we'd need to map columns properly
-                # For now, we'll use the existing Supabase upsert method
-                pass
-            
-            # Use the existing database handler's Supabase client
-            # For now, we'll use a simpler approach with the existing infrastructure
-            return []
-            
-        except Exception as e:
-            self.logger.error(f"Error executing direct batch: {e}")
-            return []
-    
-    async def _populate_processed_urls_direct(self, listings: List[Dict]):
-        """Directly populate processed URLs table using Supabase"""
-        try:
-            url_data = []
-            for listing in listings:
-                if listing.get('lot_link'):
-                    url_data.append({
-                        'site_name': listing['site_name'],
-                        'url': listing['lot_link'],
-                        'processed': False,
-                        'created_at': datetime.now().isoformat()
-                    })
-            
-            if url_data:
-                # Deduplicate URL data by site_name and url
-                unique_urls = {}
-                for url_record in url_data:
-                    key = (url_record['site_name'], url_record['url'])
-                    if key not in unique_urls:
-                        unique_urls[key] = url_record
-                
-                deduplicated_urls = list(unique_urls.values())
-                self.logger.info(f"Deduplicated {len(url_data)} URLs to {len(deduplicated_urls)} unique URLs")
-                
-                # First, get the vehicle IDs for the URLs
-                for url_record in deduplicated_urls:
-                    # Find the corresponding vehicle record
-                    vehicle_result = self.db_handler.supabase_client.table("vehicles").select("id").eq("site_name", url_record['site_name']).eq("lot_link", url_record['url']).execute()
-                    if vehicle_result.data:
-                        url_record['vehicle_id'] = vehicle_result.data[0]['id']
-                
-                # Use Supabase client to insert URLs
-                result = self.db_handler.supabase_client.table("processed_urls").upsert(
-                    deduplicated_urls,
-                    on_conflict="site_name,url"
-                ).execute()
-                
-                self.logger.info(f"Populated {len(deduplicated_urls)} URLs directly")
-                
-        except Exception as e:
-            self.logger.error(f"Error populating URLs directly: {e}")
+        unique = {(l.get("site_name"), l.get("lot_number")): l for l in listings}
+        return len(unique)
+
+    async def bulk_insert_staging_concurrent(self, site_name: str, listings: List[Dict]) -> Tuple[int, int, int]:
+        """No-op for legacy OptimizedSearchExecutor."""
+        return (len(listings), 0, 0) if listings else (0, 0, 0)
 
 class MemoryOptimizedBrowserPool(Base):
     """Browser pool with memory management and periodic cleanup"""
@@ -875,18 +651,18 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                         continue
                     
                     # Extract and format the data
-                    lot_number = listing_data['bid_number']['text']
-                    auction_house = listing_data['auction']['text'] if listing_data['auction'] else 'N/A'
-                    date_raw = listing_data['date']['text'] if listing_data['date'] else 'N/A'
-                    status = listing_data['result']['text'] if listing_data['result'] else 'N/A'
-                    maker = listing_data['company']['text'] if listing_data['company'] else 'N/A'
-                    model = listing_data['model']['text'] if listing_data['model'] else 'N/A'
-                    grade = listing_data['grade']['text'] if listing_data['grade'] else 'N/A'
-                    model_type = listing_data['model_type']['text'] if listing_data['model_type'] else 'N/A'
-                    year = listing_data['year']['text'] if listing_data['year'] else 'N/A'
+                    lot_number = (listing_data['bid_number']['text'] or '').strip()
+                    auction_house = (listing_data['auction']['text'] or 'N/A').strip()
+                    date_raw = (listing_data['date']['text'] or 'N/A').strip()
+                    status = (listing_data['result']['text'] or 'N/A').strip()
+                    maker = (listing_data['company']['text'] or 'N/A').strip()
+                    model = (listing_data['model']['text'] or 'N/A').strip()
+                    grade = (listing_data['grade']['text'] or 'N/A').strip()
+                    model_type = (listing_data['model_type']['text'] or 'N/A').strip()
+                    year = (listing_data['year']['text'] or 'N/A').strip()
                     
                     # Format mileage
-                    mileage_raw = listing_data['mileage']['text'] if listing_data['mileage'] else '0'
+                    mileage_raw = (listing_data['mileage']['text'] or '0').strip()
                     mileage_clean = mileage_raw.replace(' ', '').replace(',', '').replace('km', '').strip()
                     try:
                         mileage_num = int(''.join(c for c in mileage_clean if c.isdigit())) if mileage_clean else 0
@@ -894,20 +670,26 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     except:
                         mileage_formatted = "N/A"
                     
-                    engine = listing_data['displacement']['text'] if listing_data['displacement'] else 'N/A'
-                    transmission = listing_data['transmission']['text'] if listing_data['transmission'] else 'N/A'
-                    color = listing_data['color']['text'] if listing_data['color'] else 'N/A'
-                    equipment = listing_data['equipment']['text'] if listing_data['equipment'] else 'N/A'
+                    engine = (listing_data['displacement']['text'] or 'N/A').strip()
+                    transmission = (listing_data['transmission']['text'] or 'N/A').strip()
+                    color = (listing_data['color']['text'] or 'N/A').strip()
+                    equipment = (listing_data['equipment']['text'] or 'N/A').strip()
                     
                     # Format prices
-                    start_price_raw = listing_data['start_price']['priceValue'] if listing_data['start_price'] and listing_data['start_price']['priceValue'] else listing_data['start_price']['text'] if listing_data['start_price'] else '- - -'
-                    end_price_raw = listing_data['end_price']['priceValue'] if listing_data['end_price'] and listing_data['end_price']['priceValue'] else listing_data['end_price']['text'] if listing_data['end_price'] else '- - -'
+                    sp = listing_data['start_price']
+                    ep = listing_data['end_price']
+                    start_price_raw = (sp['priceValue'] if sp and sp.get('priceValue') else (sp['text'] if sp else '')) or '- - -'
+                    end_price_raw = (ep['priceValue'] if ep and ep.get('priceValue') else (ep['text'] if ep else '')) or '- - -'
+                    if isinstance(start_price_raw, str):
+                        start_price_raw = start_price_raw.strip()
+                    if isinstance(end_price_raw, str):
+                        end_price_raw = end_price_raw.strip()
                     
                     start_price = start_price_raw if start_price_raw != '- - -' else 'Not available (- - -)'
                     end_price = end_price_raw if end_price_raw != '- - -' else 'Not available (- - -)'
                     
-                    inspection_score = listing_data['scores']['text'] if listing_data['scores'] else 'N/A'
-                    inspection_status = listing_data['inspection']['text'] if listing_data['inspection'] else '(blank)'
+                    inspection_score = (listing_data['scores']['text'] or 'N/A').strip()
+                    inspection_status = (listing_data['inspection']['text'] or '(blank)').strip()
                     
                     lot_url = listing_data['bid_number']['href'] if listing_data['bid_number'] else ''
                     
@@ -1033,8 +815,8 @@ class Authenticator(Base):
             return False
 
 class OptimizedSearchExecutor(Base):
-    """Optimized search executor with concurrent processing and direct database operations"""
-    def __init__(self, db_handler: DatabaseHandler, browser_pool: BrowserPool):
+    """Optimized search executor with concurrent processing (no database)."""
+    def __init__(self, db_handler, browser_pool: BrowserPool):
         super().__init__()
         self.db_handler = db_handler
         self.browser_pool = browser_pool
@@ -1063,7 +845,8 @@ class OptimizedSearchExecutor(Base):
             if isinstance(result, list):
                 all_listings.extend(result)
             elif isinstance(result, Exception):
-                self.logger.error(f"Search failed: {result}")
+                tb = traceback.format_exception(type(result), result, result.__traceback__)
+                self.logger.error(f"Search failed: {result}\n{''.join(tb)}")
         
         return all_listings
 
@@ -1222,28 +1005,103 @@ def calculate_min_year_for_make(make: str) -> int:
         # Removed verbose error output
         return date.today().year - 6
 
+def _uid_state_path(root_path: Path, make: str, model: str, site_name: str) -> Path:
+    """Path for UID-keyed state file (no date in filename)."""
+    make_title = (make or "").strip().title()
+    model_title = (model or "").strip().title()
+    site_safe = (site_name or "").replace(" ", "_")
+    out_dir = root_path / make_title / model_title / "Japan"
+    return out_dir / f"{make_title}_{model_title}_{site_safe}.json"
+
+
+def save_auction_listings_uid(
+    results: List[Dict],
+    make: str,
+    model: str,
+    site_name: str,
+    root_path: Path,
+) -> Optional[Path]:
+    """
+    Save/merge listings into UID-keyed state. Skips rows already completed.
+    Path: {Make}/{Model}/Japan/{Make}_{Model}_{Site}.json
+    """
+    if not results or not make or not model or not listing_uid:
+        return None
+    out_path = _uid_state_path(root_path, make, model, site_name)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = {}
+    if out_path.is_file():
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            existing = data.get("listings") or {}
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    last_seen = date.today().isoformat()
+    merged = dict(existing)
+    new_count = 0
+
+    for listing in results:
+        if not isinstance(listing, dict):
+            continue
+        lot_link = listing.get("lot_link") or listing.get("url")
+        site_val = listing.get("site_name") or site_name
+        uid = listing_uid(
+            site_val,
+            lot_link,
+            fallback_lot_number=str(listing.get("lot_number", "")),
+            fallback_auction=str(listing.get("auction", "")),
+        )
+        if uid in merged and merged[uid].get("status") == "completed":
+            merged[uid]["last_seen"] = last_seen
+            continue
+        merged[uid] = {
+            "status": "pending",
+            "last_seen": last_seen,
+            "listing": dict(listing),
+            "details": merged.get(uid, {}).get("details") or {},
+        }
+        new_count += 1
+
+    state = {
+        "schema_version": 1,
+        "make": make.strip().title(),
+        "model": model.strip().title(),
+        "site_name": site_name,
+        "last_updated": datetime.now().isoformat(),
+        "listings": merged,
+    }
+
+    tmp_path = out_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    tmp_path.replace(out_path)
+    return out_path
+
+
 class SimplifiedSiteProcessor(Base):
-    """Simplified concurrent processing without complex task management"""
-    
-    def __init__(self, dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0):
+    """Simplified concurrent processing - saves to JSON only (no database)."""
+
+    def __init__(self, dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0, output_file=None):
         super().__init__()
         self.dry_run = dry_run
         self.site_filter = site_filter
         self.maker_filter = maker_filter
         self.model_filter = model_filter
         self.limit = limit
-        self.db_handler = DatabaseHandler()
+        self.output_file = output_file
+        self.collected_listings = []
         pool_size = browser_settings.get("browser_pool_size", 2)
         self.browser_pool = MemoryOptimizedBrowserPool(pool_size=pool_size)
-        self.direct_db = TrulyDirectDatabaseHandler(self.db_handler)
+        self.direct_db = _NoDbPlaceholder()
         self.search_optimizer = SearchOptimizer()
         self.logger = setup_listing_logging()
         
     async def initialize(self):
         """Initialize components"""
         self.logger.info("=== Initializing Simplified Site Processor ===")
-        if not self.dry_run:
-            self.db_handler.connect()
         await self.browser_pool.initialize()
         self.logger.info("Simplified initialization complete\n")
         
@@ -1268,7 +1126,8 @@ class SimplifiedSiteProcessor(Base):
             if isinstance(result, int):
                 total_listings += result
             elif isinstance(result, Exception):
-                self.logger.error(f"Site processing failed: {result}")
+                tb = traceback.format_exception(type(result), result, result.__traceback__)
+                self.logger.error(f"Site processing failed: {result}\n{''.join(tb)}")
         
         self.logger.info(f"Total listings processed: {total_listings}")
         return total_listings
@@ -1354,14 +1213,12 @@ class SimplifiedSiteProcessor(Base):
                     )
                     
                     if listings:
-                        # Save directly to database
-                        saved = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
-                        total_listings += saved
-                        
-                        # Calculate duplicates removed
-                        duplicates_removed = len(listings) - saved
-                        print(f"{search['make']} ({site_name}): {len(listings)} found -> {saved} saved ({duplicates_removed} duplicates)")
-                        self.logger.info(f"Site {site_name}: {search['make']} - {saved} listings")
+                        count = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
+                        total_listings += count
+                        if getattr(self, 'output_file', None):
+                            self.collected_listings.extend(listings)
+                        print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted")
+                        self.logger.info(f"Site {site_name}: {search['make']} - {count} listings")
                     else:
                         print(f"{search['make']} ({site_name}): 0 found -> 0 saved")
                         
@@ -1373,7 +1230,7 @@ class SimplifiedSiteProcessor(Base):
             return total_listings
             
         except Exception as e:
-            self.logger.error(f"Error processing site {site_name}: {e}")
+            _log_error_with_tb(self.logger, f"Error processing site {site_name}: {e}", e)
             return 0
         finally:
             if browser:
@@ -1402,24 +1259,19 @@ class SimplifiedSiteProcessor(Base):
         self.logger.info("Cleaning up simplified processor resources...")
         try:
             await self.browser_pool.cleanup()
-            if not self.dry_run:
-                self.db_handler.close()
             self.logger.info("Simplified cleanup completed successfully")
         except Exception as e:
             self.logger.error(f"Error during simplified cleanup: {str(e)}")
 
 class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
-    """Site processor with proper staging workflow for duplicate elimination"""
+    """Site processor - saves to JSON only (no database)."""
 
     def __init__(self, dry_run=False, site_filter=None, maker_filter=None, model_filter=None, limit=0, output_file=None):
         super().__init__(dry_run=dry_run, site_filter=site_filter, maker_filter=maker_filter,
-                         model_filter=model_filter, limit=limit)
-        self.db_handler = DatabaseHandler()
-        self.output_file = output_file
-        self.collected_listings = []  # For JSON output when output_file + dry_run
+                         model_filter=model_filter, limit=limit, output_file=output_file)
         pool_size = browser_settings.get("browser_pool_size", 2)
         self.browser_pool = SafeMemoryOptimizedBrowserPool(pool_size=pool_size)
-        self.direct_db = TrulyDirectDatabaseHandler(self.db_handler)  # Use staging workflow
+        self.direct_db = _NoDbPlaceholder()
         self.search_optimizer = SearchOptimizer()
         self.logger = setup_listing_logging()
         
@@ -1452,17 +1304,19 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
                     )
                     
                     if listings:
+                        count = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
+                        total_listings += count
+                        if getattr(self, 'output_file', None) and not self.dry_run:
+                            root_path = Path(self.output_file)
+                            p = save_auction_listings_uid(
+                                listings, search['make'], search['models'][0], site_name, root_path
+                            )
+                            if p:
+                                print(f"  -> Saved to {p.name}")
                         if self.dry_run:
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN (would save {len(listings)})")
-                            total_listings += len(listings)
-                            if getattr(self, 'output_file', None):
-                                self.collected_listings.extend(listings)
+                            print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN ({count} unique)")
                         else:
-                            # Save using direct database handler
-                            saved = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
-                            total_listings += saved
-                            duplicates_removed = len(listings) - saved
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> {saved} saved ({duplicates_removed} duplicates)")
+                            print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted")
                     else:
                         print(f"{search['make']} ({site_name}): 0 found -> 0 saved")
                         
@@ -1474,17 +1328,17 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
             return total_listings
             
         except Exception as e:
-            self.logger.error(f"Error processing site {site_name}: {e}")
+            _log_error_with_tb(self.logger, f"Error processing site {site_name}: {e}", e)
             return 0
         finally:
             if browser:
                 await self.browser_pool.return_browser(browser)
 
 class OptimizedSiteProcessor(SimplifiedSiteProcessor):
-    """Legacy optimized site processor - now uses simplified version"""
+    """Legacy optimized site processor - no database, saves to JSON only."""
     def __init__(self):
         super().__init__()
-        self.search_executor = OptimizedSearchExecutor(self.db_handler, self.browser_pool)
+        self.search_executor = OptimizedSearchExecutor(_NoDbPlaceholder(), self.browser_pool)
         
     async def process_all_sites_concurrently(self):
         """Legacy method name - redirects to simplified processing"""
@@ -1504,38 +1358,6 @@ class OptimizedSiteProcessor(SimplifiedSiteProcessor):
             await self.initialize()
             await self.process_all_sites_concurrently()
             
-            # Process staging data after collection is complete
-            print("\nProcessing staging to main...")
-            processed, duplicates = self.db_handler.process_staging_to_main()
-            print(f"Processed {processed} records ({duplicates} duplicates) from staging to main")
-            
-            # Verify transfer
-            print("\nVerifying data transfer...")
-            stats = self.db_handler.verify_data_movement()
-            if stats:
-                print(f"Records in staging: {stats['processed_count']}")
-                print(f"Duplicates found: {stats['duplicate_count']}")
-                print(f"Total records in main: {stats['main_count']}")
-                print(f"URLs mapped: {stats['urls_count']}")
-            
-            # Populate processed URLs for detailed extraction
-            print("\nPopulating processed URLs...")
-            inserted, skipped = self.db_handler.populate_processed_urls()
-            print(f"Inserted {inserted} new URLs for processing")
-            print(f"Skipped {skipped} existing URLs")
-            
-            # Verify URL processing
-            print("\nVerifying URL processing...")
-            url_stats = self.db_handler.verify_url_processing()
-            print(f"Total vehicles: {url_stats['total_vehicles']}")
-            print(f"URLs processed: {url_stats['processed_urls']}")
-            print(f"URLs remaining: {url_stats['unprocessed_urls']}")
-            
-            # Clean up old staging data
-            print("\nCleaning up old staging data...")
-            cleaned = self.db_handler.cleanup_staging()
-            print(f"Cleaned up {cleaned} old staging records")
-            
             print(f"\n{'='*70}")
             print("OPTIMIZED DATA COLLECTION COMPLETE")
             print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1549,8 +1371,8 @@ class OptimizedSiteProcessor(SimplifiedSiteProcessor):
 async def optimized_main():
     """Complete optimized main function"""
     
-    print("🚀 Starting FULLY OPTIMIZED Auction Data Collection")
-    print(f"⏰ Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("Starting FULLY OPTIMIZED Auction Data Collection")
+    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     processor = SimplifiedSiteProcessor()
     
@@ -1567,24 +1389,9 @@ async def optimized_main():
         end_time = time.time()
         duration = end_time - start_time
         
-        print(f"✅ Collection completed in {duration:.2f} seconds")
-        print(f"📊 Total listings processed: {total_listings}")
-        print(f"⏰ End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Process remaining staging data
-        print("\nProcessing remaining staging data...")
-        processed, duplicates = processor.db_handler.process_staging_to_main()
-        print(f"Processed {processed} records ({duplicates} duplicates)")
-        
-        # Populate processed URLs
-        print("\nPopulating processed URLs...")
-        inserted, skipped = processor.db_handler.populate_processed_urls()
-        print(f"Inserted {inserted} new URLs for processing")
-        
-        # Cleanup old staging data
-        print("\nCleaning up old staging data...")
-        cleaned = processor.db_handler.cleanup_staging()
-        print(f"Cleaned up {cleaned} old staging records")
+        print(f"Collection completed in {duration:.2f} seconds")
+        print(f"Total listings processed: {total_listings}")
+        print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         print(f"\nFULLY OPTIMIZED PROCESSING COMPLETE!")
         print(f"Processing speed: {total_listings/duration:.1f} listings/second")
@@ -1699,32 +1506,10 @@ async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=Non
         print(f"Processing time: {duration/60:.1f} minutes")
         print(f"Speed: {rate:.1f} vehicles/minute")
         print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-        # Save extracted listings to data folder (same structure as sales: Make/Model/Japan/Make_Model_Site_date.json)
-        if output_file and getattr(processor, 'collected_listings', None):
-            root_path = Path(output_file)
-            extraction_date = date.today().isoformat()
-            paths = save_collected_auction_listings(
-                processor.collected_listings, root_path, extraction_date
-            )
-            for p in paths:
-                print(f"Saved to {p}")
-
-        if not dry_run:
-            # Process staging data to main with duplicate elimination
-            processed, duplicates = processor.db_handler.process_staging_to_main()
-
-            # Populate processed URLs for detailed extraction
-            inserted, skipped = processor.db_handler.populate_processed_urls()
-
-            # Clean up old staging data
-            cleaned = processor.db_handler.cleanup_staging()
-
-            print(f"\nTRULY OPTIMIZED PROCESSING COMPLETE!")
-            print(f"Achieved {rate:.1f}x speed improvement with direct operations!")
         
     except Exception as e:
-        print(f"Fatal error: {e}")
+        tb = traceback.format_exception(type(e), e, e.__traceback__)
+        print(f"Fatal error: {e}\n{''.join(tb)}", file=sys.stderr)
         raise
     finally:
         await processor.cleanup()
@@ -1738,4 +1523,9 @@ async def main():
     await truly_optimized_main()
 
 if __name__ == "__main__":
-    asyncio.run(truly_optimized_main())
+    try:
+        asyncio.run(truly_optimized_main())
+    except Exception as e:
+        tb = traceback.format_exception(type(e), e, e.__traceback__)
+        print(f"\nPipeline failed: {e}\n{''.join(tb)}", file=sys.stderr)
+        sys.exit(1)
