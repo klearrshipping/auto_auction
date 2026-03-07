@@ -9,6 +9,8 @@ Auction manager: runs the auction data pipeline.
 """
 
 import argparse
+import json
+import os
 import subprocess
 import sys
 import traceback
@@ -20,6 +22,7 @@ _root = _script_dir.parent.parent
 sys.path.insert(0, str(_root))
 
 _log_file = None
+_RUN_MARKER_PATH = Path(__file__).resolve().parent.parent.parent / "logs" / "auction_pipeline_run.json"
 
 
 def log(msg: str):
@@ -36,8 +39,10 @@ def log(msg: str):
 
 def _run(cmd: list) -> tuple[int, str]:
     """Run subprocess with stdout/stderr inherited. Returns (exit_code, stderr_capture)."""
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
     result = subprocess.run(
-        cmd, cwd=str(_root), stdout=sys.stdout, stderr=subprocess.PIPE, text=True
+        cmd, cwd=str(_root), stdout=sys.stdout, stderr=subprocess.PIPE, text=True, env=env
     )
     stderr = result.stderr or ""
     # Re-print stderr so it appears in logs when inherited
@@ -98,6 +103,26 @@ def run_compile(limit: int = 0) -> int:
     return rc
 
 
+def trigger_auction_sync(replace: bool = False) -> bool:
+    """Run auction cloud sync to push compiled data to Supabase.
+    If replace=True, truncates vehicles table before sync (clean slate).
+    """
+    sync_script = _root / "tools" / "aggregate_auction" / "cloud_sync.py"
+    if not sync_script.exists():
+        log(f"Auction sync script not found: {sync_script}")
+        return False
+    cmd = [sys.executable, "-u", str(sync_script)]
+    if replace:
+        cmd.extend(["--full", "--truncate"])
+    log(f"\n>>> Triggering auction Supabase sync: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, cwd=str(_root), check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        log(f"Auction sync failed: {e}")
+        return False
+
+
 def main():
     global _log_file
     parser = argparse.ArgumentParser(
@@ -113,12 +138,22 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Limit jobs per step (0 = all)")
     parser.add_argument("--dry-run", action="store_true", help="Clean only: dry-run (no writes)")
     parser.add_argument("--log-file", help="Write progress logs to file (for background runs)")
+    parser.add_argument("--replace", action="store_true", help="Truncate vehicles table before sync (full replace)")
     args = parser.parse_args()
 
     if args.log_file:
         Path(args.log_file).parent.mkdir(parents=True, exist_ok=True)
         _log_file = open(args.log_file, "w", encoding="utf-8")
         log(f"Logging to {args.log_file}")
+
+    # Write run marker so status checks can reliably detect completion
+    _RUN_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    run_marker = {
+        "status": "running",
+        "started_at": datetime.now().isoformat(),
+        "log_file": args.log_file,
+    }
+    _RUN_MARKER_PATH.write_text(json.dumps(run_marker, indent=2), encoding="utf-8")
 
     if args.resume:
         args.no_prune = True
@@ -157,9 +192,22 @@ def main():
             log(f"Compile failed (exit {rc})")
             sys.exit(rc)
 
+        # Step 5: Push to Supabase (like sales pipeline)
+        log("\n--- Step 5: Supabase sync ---")
+        trigger_auction_sync(replace=args.replace)
+
     log("\n" + "=" * 60)
     log("PIPELINE COMPLETE")
     log("=" * 60)
+
+    # Update run marker to complete
+    try:
+        run_marker = json.loads(_RUN_MARKER_PATH.read_text(encoding="utf-8"))
+        run_marker["status"] = "complete"
+        run_marker["completed_at"] = datetime.now().isoformat()
+        _RUN_MARKER_PATH.write_text(json.dumps(run_marker, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     if _log_file:
         _log_file.close()
@@ -176,6 +224,14 @@ if __name__ == "__main__":
         if _log_file:
             _log_file.write(msg + "\n")
             _log_file.flush()
+        try:
+            run_marker = json.loads(_RUN_MARKER_PATH.read_text(encoding="utf-8"))
+            run_marker["status"] = "failed"
+            run_marker["error"] = str(e)
+            run_marker["failed_at"] = datetime.now().isoformat()
+            _RUN_MARKER_PATH.write_text(json.dumps(run_marker, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         sys.exit(1)
     finally:
         if _log_file:

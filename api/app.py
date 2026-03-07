@@ -5,20 +5,14 @@ Run with: uvicorn api.app:app --reload --port 8000
 
 import os
 from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from api.services.valuation_service import ValuationService
-
-# --- Paths ---
-SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(SERVER_DIR, 'static')
+from api.services.auction_service import AuctionService
 
 app = FastAPI(title="Japan Auction Valuation API", version="1.0.0")
 service = ValuationService()
-
-# Serve static frontend
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+auction_service = AuctionService()
 
 # --- Request/Response Models ---
 class ValuationRequest(BaseModel):
@@ -32,7 +26,7 @@ class ValuationRequest(BaseModel):
 # --- Routes ---
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(STATIC_DIR, 'index.html'))
+    return {"message": "Japan Auction Valuation API", "docs": "/docs"}
 
 @app.post("/api/valuate")
 async def valuate(req: ValuationRequest):
@@ -69,5 +63,21 @@ async def stream_all_buckets():
     """Global real-time streaming endpoint for all buckets"""
     return StreamingResponse(
         service.get_global_stream(),
+        media_type="text/event-stream"
+    )
+
+@app.get("/api/stream-auction-vehicles")
+async def stream_auction_vehicles():
+    """Stream all auction vehicles from Supabase (auction_data.vehicles)"""
+    return StreamingResponse(
+        auction_service.stream_vehicles(),
+        media_type="text/event-stream"
+    )
+
+@app.get("/api/stream-auction-vehicles-with-valuation")
+async def stream_auction_vehicles_with_valuation():
+    """Stream auction vehicles paired with sales buckets and valuations."""
+    return StreamingResponse(
+        auction_service.stream_vehicles_with_valuation(),
         media_type="text/event-stream"
     )

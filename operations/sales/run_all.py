@@ -11,6 +11,9 @@ Usage:
   python -u run_sales_data_all.py --maker TOYOTA            # one maker only, all its models
   python -u run_sales_data_all.py --resume                 # resume a previously interrupted run
   python -u run_sales_data_all.py --auto                   # find next pending date from working_days.json
+  python -u run_sales_data_all.py --scheduled              # extract (today - 1 day) at 1 AM (results available ~9h after auction)
+
+Schedule: Auction Mon-Fri; results available ~9h after close = 1 AM next day. Run daily at 1:00 AM.
 
 Progress tracker saved to:  data/sales_data/_progress/extraction_YYYY-MM-DD.json
 """
@@ -20,7 +23,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import cycle
 from pathlib import Path
 import subprocess
@@ -342,10 +345,20 @@ async def main():
     parser.add_argument("--limit", type=int, default=0, help="Max jobs to run (0 = all)")
     parser.add_argument("--delay", type=float, default=3.0, help="Seconds between jobs (default 3)")
     parser.add_argument("--resume", action="store_true", help="Resume a previously interrupted run for the same date")
+    parser.add_argument("--scheduled", action="store_true", help="Extract (today - 2 days); for 1 AM daily run (results available D+2)")
     args = parser.parse_args()
 
     auction_date = args.date
     auto_mode = args.auto
+    scheduled_mode = args.scheduled
+
+    if scheduled_mode:
+        target = date.today() - timedelta(days=1)
+        if target.weekday() >= 5:
+            log(f"Skipping: {target} is weekend (no auction).")
+            return
+        auction_date = target.isoformat()
+        log(f"Scheduled run: extracting auction date {auction_date} (results available ~1 AM today)")
 
     if not auction_date and auto_mode:
         auction_date = get_next_pending_date()

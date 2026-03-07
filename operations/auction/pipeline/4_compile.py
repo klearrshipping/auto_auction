@@ -42,21 +42,43 @@ def find_state_files(root: Path, limit: int = 0) -> list[Path]:
     return files
 
 
-def compile_record_from_state_entry(entry: dict) -> dict:
+def compile_record_from_state_entry(entry: dict, site_name: str) -> dict:
     """Build one compiled record from state entry (listing + details)."""
     listing = entry.get("listing") or {}
     details = entry.get("details") or {}
     ld_details = details.get("details") or {}
 
+    score_val = listing.get("scores") or ld_details.get("scores")
+    scores_json = {"score": str(score_val)} if score_val is not None else None
+
+    year_val = listing.get("year")
+    if year_val is not None and isinstance(year_val, (int, str)):
+        try:
+            y = int(year_val)
+            year_val = y if 1900 <= y <= 2030 else None
+        except (ValueError, TypeError):
+            year_val = None
+    else:
+        year_val = None
+
     return {
+        "site_name": site_name,
         "lot_number": listing.get("lot_number") or details.get("lot_number"),
         "make": listing.get("make"),
         "model": listing.get("model"),
+        "year": year_val,
         "grade": listing.get("grade"),
+        "model_type": listing.get("model_type"),
         "color": listing.get("color") or ld_details.get("color"),
         "mileage": listing.get("mileage") or ld_details.get("mileage"),
-        "score": listing.get("scores") or ld_details.get("scores"),
+        "score": score_val,
+        "scores": scores_json,
+        "start_price": listing.get("start_price"),
+        "end_price": listing.get("end_price"),
+        "result": listing.get("result"),
+        "lot_link": listing.get("lot_link") or listing.get("url"),
         "auction": listing.get("auction"),
+        "search_date": listing.get("search_date"),
         "auction_time": ld_details.get("auction_time"),
         "image_urls": details.get("image_urls") or [],
     }
@@ -81,7 +103,8 @@ def process_file(state_path: Path) -> bool:
         print(f"  Skipping: no completed entries")
         return False
 
-    compiled = [compile_record_from_state_entry(e) for e in completed]
+    site_name = state.get("site_name") or ""
+    compiled = [compile_record_from_state_entry(e, site_name) for e in completed]
 
     out_path = state_path.parent / f"{state_path.stem}_compiled.json"
     with open(out_path, "w", encoding="utf-8") as f:

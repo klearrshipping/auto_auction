@@ -28,7 +28,7 @@ if (Test-Path $venvPy) {
 }
 
 $errFile = Join-Path $logDir "auction_pipeline_${timestamp}_err.log"
-$args = @("-u", (Join-Path $auctionDir "auction_manager.py"))
+$args = @("-u", (Join-Path $auctionDir "auction_manager.py"), "--log-file", (Join-Path $logDir "auction_pipeline_${timestamp}_diag.log"))
 if ($Resume) { $args += "--resume"; Write-Host "Resume mode: skipping prune and listings" }
 $psi = @{
     FilePath = $py

@@ -728,6 +728,7 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                         'make': make,
                         'model': model,
                         'grade': grade if grade != 'N/A' else '',
+                        'model_type': model_type if model_type and model_type != 'N/A' else '',
                         'color': color if color != 'N/A' else '',
                         'mileage': mileage_num,
                         'start_price': start_price_num,
@@ -1023,6 +1024,8 @@ def save_auction_listings_uid(
 ) -> Optional[Path]:
     """
     Save/merge listings into UID-keyed state. Skips rows already completed.
+    Treats auction house as source of truth: lots not in the fresh extraction
+    are removed (withdrawn, sold, etc.) even if auction date hasn't passed.
     Path: {Make}/{Model}/Japan/{Make}_{Model}_{Site}.json
     """
     if not results or not make or not model or not listing_uid:
@@ -1039,10 +1042,31 @@ def save_auction_listings_uid(
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Build UIDs from fresh extraction (auction house = source of truth)
+    new_uids = set()
+    for listing in results:
+        if not isinstance(listing, dict):
+            continue
+        lot_link = listing.get("lot_link") or listing.get("url")
+        site_val = listing.get("site_name") or site_name
+        uid = listing_uid(
+            site_val,
+            lot_link,
+            fallback_lot_number=str(listing.get("lot_number", "")),
+            fallback_auction=str(listing.get("auction", "")),
+        )
+        new_uids.add(uid)
+
     last_seen = date.today().isoformat()
     merged = dict(existing)
-    new_count = 0
+    # Remove lots no longer on auction house (withdrawn, sold, etc.)
+    removed = [uid for uid in merged if uid not in new_uids]
+    for uid in removed:
+        del merged[uid]
+    if removed:
+        print(f"  -> Removed {len(removed)} lot(s) no longer on auction house", flush=True)
 
+    new_count = 0
     for listing in results:
         if not isinstance(listing, dict):
             continue
@@ -1199,7 +1223,7 @@ class SimplifiedSiteProcessor(Base):
             
             # Login once per site
             if not await self._login_to_site(page, site_name):
-                print(f"Login failed for {site_name}, skipping.")
+                print(f"Login failed for {site_name}, skipping.", flush=True)
                 self.logger.error(f"Login failed for {site_name}")
                 return 0
 
@@ -1217,10 +1241,10 @@ class SimplifiedSiteProcessor(Base):
                         total_listings += count
                         if getattr(self, 'output_file', None):
                             self.collected_listings.extend(listings)
-                        print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted")
+                        print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted", flush=True)
                         self.logger.info(f"Site {site_name}: {search['make']} - {count} listings")
                     else:
-                        print(f"{search['make']} ({site_name}): 0 found -> 0 saved")
+                        print(f"{search['make']} ({site_name}): 0 found -> 0 saved", flush=True)
                         
                 except Exception as e:
                     self.logger.error(f"Error processing {search['make']} on {site_name}: {e}")
@@ -1290,7 +1314,7 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
             
             # Login once per site
             if not await self._login_to_site(page, site_name):
-                print(f"Login failed for {site_name}, skipping.")
+                print(f"Login failed for {site_name}, skipping.", flush=True)
                 self.logger.error(f"Login failed for {site_name}")
                 return 0
 
@@ -1312,13 +1336,13 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
                                 listings, search['make'], search['models'][0], site_name, root_path
                             )
                             if p:
-                                print(f"  -> Saved to {p.name}")
+                                print(f"  -> Saved to {p.name}", flush=True)
                         if self.dry_run:
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN ({count} unique)")
+                            print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN ({count} unique)", flush=True)
                         else:
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted")
+                            print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted", flush=True)
                     else:
-                        print(f"{search['make']} ({site_name}): 0 found -> 0 saved")
+                        print(f"{search['make']} ({site_name}): 0 found -> 0 saved", flush=True)
                         
                 except Exception as e:
                     self.logger.error(f"Error processing {search['make']} on {site_name}: {e}")
