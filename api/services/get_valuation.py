@@ -1,5 +1,5 @@
 """
-Pair auction vehicles with sales buckets for valuation.
+Get valuation for auction vehicles by pairing with sales buckets.
 Uses grade→model_type lookup from japan_sales for accurate matching.
 """
 
@@ -34,8 +34,8 @@ def _norm(s: str) -> str:
     return (s or "").strip().upper()
 
 
-class VehicleBucketPairing:
-    """Pairs auction vehicles with sales buckets using grade→model_type lookup from japan_sales."""
+class GetValuation:
+    """Gets valuation for auction vehicles by pairing with sales buckets (grade→model_type lookup from japan_sales)."""
 
     def __init__(self):
         url = os.getenv("SUPABASE_URL")

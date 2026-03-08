@@ -6,6 +6,8 @@ Auction manager: runs the auction data pipeline.
 2. Listings: Extract auction listings (pipeline/2_extract_listings.py)
 3. Details: Fetch details only for pending entries (pipeline/3_extract_details.py)
 4. Compile: Merge state into compiled JSON (pipeline/4_compile.py)
+5. Supabase sync: Push compiled data to auction_data.vehicles
+6. Get valuation: Populate auction_data.valuations (fair_value, min_value, max_value, etc.)
 """
 
 import argparse
@@ -123,6 +125,22 @@ def trigger_auction_sync(replace: bool = False) -> bool:
         return False
 
 
+def trigger_get_valuation() -> bool:
+    """Run get-valuation to populate auction_data.valuations (fair_value, min_value, max_value, etc.)."""
+    valuation_script = _root / "tools" / "run_get_valuation.py"
+    if not valuation_script.exists():
+        log(f"Get valuation script not found: {valuation_script}")
+        return False
+    cmd = [sys.executable, "-u", str(valuation_script)]
+    log(f"\n>>> Triggering get valuation: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, cwd=str(_root), check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        log(f"Get valuation failed: {e}")
+        return False
+
+
 def main():
     global _log_file
     parser = argparse.ArgumentParser(
@@ -139,6 +157,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Clean only: dry-run (no writes)")
     parser.add_argument("--log-file", help="Write progress logs to file (for background runs)")
     parser.add_argument("--replace", action="store_true", help="Truncate vehicles table before sync (full replace)")
+    parser.add_argument("--no-valuation", action="store_true", help="Skip get-valuation step (populate valuations table)")
     args = parser.parse_args()
 
     if args.log_file:
@@ -195,6 +214,11 @@ def main():
         # Step 5: Push to Supabase (like sales pipeline)
         log("\n--- Step 5: Supabase sync ---")
         trigger_auction_sync(replace=args.replace)
+
+        # Step 6: Populate valuations table (fair_value, min_value, max_value, etc.)
+        if not args.no_valuation:
+            log("\n--- Step 6: Get valuation ---")
+            trigger_get_valuation()
 
     log("\n" + "=" * 60)
     log("PIPELINE COMPLETE")

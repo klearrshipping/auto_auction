@@ -600,20 +600,21 @@ class SearchOptimizer(EnhancedSearchOptimizer):
 
             for row_index, row in enumerate(rows, 1):
                 try:
-                    # Extract data using the specific ID pattern
+                    # Extract data using the specific ID pattern (row-scoped for reliability)
                     listing_data = await row.evaluate('''(row) => {
                         const rowId = row.id;
-                        const cellNumber = rowId ? rowId.replace('cell_', '') : row.rowIndex || '1';
+                        const cellNumber = rowId ? String(rowId).replace('cell_', '') : String(row.rowIndex != null ? row.rowIndex : 1);
+                        const scope = row;
                         
                         const getData = (fieldName) => {
-                            const cell = document.querySelector(`#${fieldName}_${cellNumber}`);
+                            const cell = scope.querySelector(`#${fieldName}_${cellNumber}`) || document.querySelector(`#${fieldName}_${cellNumber}`);
                             if (!cell) return null;
                             
                             const link = cell.querySelector('a');
                             const priceDiv = cell.querySelector(`div[id^="price"]`);
                             
                             return {
-                                text: cell.textContent.trim(),
+                                text: (cell.textContent || '').trim(),
                                 href: link ? link.href : null,
                                 priceValue: priceDiv ? priceDiv.textContent.trim() : null
                             };
@@ -658,7 +659,8 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                     maker = (listing_data['company']['text'] or 'N/A').strip()
                     model = (listing_data['model']['text'] or 'N/A').strip()
                     grade = (listing_data['grade']['text'] or 'N/A').strip()
-                    model_type = (listing_data['model_type']['text'] or 'N/A').strip()
+                    mt_raw = listing_data.get('model_type')
+                    model_type = (mt_raw.get('text') or 'N/A').strip() if mt_raw else 'N/A'
                     year = (listing_data['year']['text'] or 'N/A').strip()
                     
                     # Format mileage

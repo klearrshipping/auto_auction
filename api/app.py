@@ -74,10 +74,21 @@ async def stream_auction_vehicles():
         media_type="text/event-stream"
     )
 
+@app.get("/api/get-valuation")
 @app.get("/api/stream-auction-vehicles-with-valuation")
-async def stream_auction_vehicles_with_valuation():
-    """Stream auction vehicles paired with sales buckets and valuations."""
+async def get_valuation():
+    """Stream auction vehicles with sales bucket pairing and valuations."""
     return StreamingResponse(
         auction_service.stream_vehicles_with_valuation(),
+        media_type="text/event-stream"
+    )
+
+
+@app.get("/api/stream-auction-listings")
+async def stream_auction_listings():
+    """Stream auction listings: image_links, year, make, model, grade, color, mileage,
+    score, auction_house, min_price, max_price, trimmed_mean. Uses pre-computed valuations."""
+    return StreamingResponse(
+        auction_service.stream_auction_listings(),
         media_type="text/event-stream"
     )
