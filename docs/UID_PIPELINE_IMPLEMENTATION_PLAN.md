@@ -200,15 +200,15 @@ def save_auction_listings_uid(
 | **4.5.5** | Save state; delete corresponding `_compiled.json` |
 | **4.5.6** | Remove `prune_file_pair` (listing+details) — single file now |
 
-### 4.6 `auction_manager.py` (operations/auction/auction_manager.py)
+### 4.6 `run_japan_auction_pipeline.py` (operations/auction/run_japan_auction_pipeline.py; shim: `auction_manager.py`)
 
 | Task | Description |
 |------|-------------|
 | **4.6.1** | Remove `--full` flag (no longer needed; UID handles incremental) |
-| **4.6.2** | Pipeline order unchanged: remove_lots → run_all → run_details → process_auction_data |
+| **4.6.2** | Pipeline order unchanged: remove_lots → extract_auction_listings → run_details → process_auction_data |
 | **4.6.3** | Update docstrings to reflect UID-based flow |
 
-### 4.7 `run_all.py` (operations/auction/run_all.py)
+### 4.7 `extract_auction_listings.py` (operations/auction/pipeline/extract_auction_listings.py; shim: `2_extract_listings.py`)
 
 | Task | Description |
 |------|-------------|
@@ -301,7 +301,7 @@ If `Audi_A3_Zervtek_2026-03-03.json` and `Audi_A3_Zervtek_2026-03-04.json` both 
 | **Phase 4** | Refactor `run_details.py` (state file handling) | 1 hr |
 | **Phase 5** | Refactor `process_auction_data.py` (read keyed state) | 1 hr |
 | **Phase 6** | Refactor `remove_lots.py` (keyed state pruning) | 1 hr |
-| **Phase 7** | Update `run_all.py`, `auction_manager.py`, `get_images.py` | 0.5 hr |
+| **Phase 7** | Update `extract_auction_listings.py`, `run_japan_auction_pipeline.py`, `get_images.py` | 0.5 hr |
 | **Phase 8** | Run migration, test full pipeline | 1–2 hr |
 
 **Total:** ~8–12 hours
@@ -318,7 +318,7 @@ If `Audi_A3_Zervtek_2026-03-03.json` and `Audi_A3_Zervtek_2026-03-04.json` both 
 ### 8.2 Integration Tests
 
 1. **Migration:** Run on copy of `data/auction_data`, verify state structure
-2. **Full pipeline:** remove_lots → run_all → run_details → process_auction_data
+2. **Full pipeline:** remove_lots → extract_auction_listings → run_details → process_auction_data
 3. **Incremental:** Run pipeline twice; second run should skip completed UIDs
 4. **New lot:** Manually add pending to state; run details; verify completion
 

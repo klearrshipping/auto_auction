@@ -16,6 +16,7 @@ import os
 import json
 import re
 import argparse
+from datetime import datetime, timezone
 from typing import List, Dict, Tuple, Set
 from supabase import create_client, Client, ClientOptions
 
@@ -153,6 +154,7 @@ def clean_record(item: Dict, rel_path: str) -> Dict | None:
         "search_date": clean_string(item.get("search_date")),
         "auction_time": clean_string(item.get("auction_time")),
         "image_urls": item.get("image_urls") if isinstance(item.get("image_urls"), list) else None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

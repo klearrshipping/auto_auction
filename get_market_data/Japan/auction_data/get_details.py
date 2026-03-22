@@ -7,7 +7,7 @@ Used by operations/auction/pipeline/3_extract_details.py for UID-keyed state fil
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import urljoin
 from playwright.async_api import BrowserContext, Page
@@ -25,6 +25,29 @@ import asyncio
 class ExtractionAborted(Exception):
     """Raised when extraction is aborted due to too many consecutive empty results."""
     pass
+
+
+JST = timezone(timedelta(hours=9))
+AUCTION_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _is_auction_upcoming(auction_time_str: Optional[str]) -> bool:
+    """
+    True if auction_time is at least 24 hours ahead of now (JST).
+    False if within 24 hours, past, or unparseable (reject to be safe).
+    """
+    if not auction_time_str or not isinstance(auction_time_str, str):
+        return True  # No date = keep (backwards compatible)
+    s = auction_time_str.strip()
+    if not s or len(s) < 10:
+        return True
+    try:
+        dt = datetime.strptime(s[:19], AUCTION_TIME_FMT).replace(tzinfo=JST)
+        now = datetime.now(timezone.utc).astimezone(JST)
+        cutoff = now + timedelta(hours=24)
+        return dt >= cutoff
+    except ValueError:
+        return True  # Unparseable = keep
 
 
 def _detail_has_data(detail: Optional[Dict]) -> bool:
@@ -298,14 +321,20 @@ async def fetch_pending_details(
             if isinstance(outcome, Exception) or outcome is None:
                 consecutive_empty += 1
             else:
-                if uid in listings:
-                    listings[uid]["details"] = outcome
-                    listings[uid]["status"] = "completed"
-                if _detail_has_data(outcome):
-                    meaningful += 1
-                    consecutive_empty = 0
+                auction_time = (outcome.get("details") or {}).get("auction_time")
+                if not _is_auction_upcoming(auction_time):
+                    if uid in listings:
+                        del listings[uid]
+                    # Don't count as consecutive_empty - we're filtering by date, not failing
                 else:
-                    consecutive_empty += 1
+                    if uid in listings:
+                        listings[uid]["details"] = outcome
+                        listings[uid]["status"] = "completed"
+                    if _detail_has_data(outcome):
+                        meaningful += 1
+                        consecutive_empty = 0
+                    else:
+                        consecutive_empty += 1
 
             if consecutive_empty >= max_consecutive_empty:
                 raise ExtractionAborted(

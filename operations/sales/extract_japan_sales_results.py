@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Extract sales data for ALL makes/models from manufacturer_config_JM across all active auction sites.
+Japan auction SALES / sold-results extraction (0–N years per manufacturer_config_JM).
+
+Extracts sold auction results for ALL makes/models across active sites (round-robin per site).
 Runs for a single auction date to keep load low.
 
 Usage:
-  python -u run_sales_data_all.py                          # today's date, all sites round-robin
-  python -u run_sales_data_all.py --date 2026-01-15        # specific date
-  python -u run_sales_data_all.py --site Zervtek           # one site only
-  python -u run_sales_data_all.py --limit 5                # first 5 make/models (test run)
-  python -u run_sales_data_all.py --maker TOYOTA            # one maker only, all its models
-  python -u run_sales_data_all.py --resume                 # resume a previously interrupted run
-  python -u run_sales_data_all.py --auto                   # find next pending date from working_days.json
-  python -u run_sales_data_all.py --scheduled              # extract (today - 1 day) at 1 AM (results available ~9h after auction)
+  python -u operations/sales/extract_japan_sales_results.py              # today's date
+  python -u operations/sales/extract_japan_sales_results.py --date 2026-01-15
+  python -u operations/sales/extract_japan_sales_results.py --site Zervtek
+  python -u operations/sales/extract_japan_sales_results.py --limit 5
+  python -u operations/sales/extract_japan_sales_results.py --maker TOYOTA
+  python -u operations/sales/extract_japan_sales_results.py --resume
+  python -u operations/sales/extract_japan_sales_results.py --auto
+  python -u operations/sales/extract_japan_sales_results.py --scheduled
 
-Schedule: Auction Mon-Fri; results available ~9h after close = 1 AM next day. Run daily at 1:00 AM.
+Schedule: Auction Mon-Fri; results ~1 AM JST. Run at 8 PM Europe (4 AM JST) so data is ready before 9 AM market open.
 
 Progress tracker saved to:  data/sales_data/_progress/extraction_YYYY-MM-DD.json
 """
@@ -23,7 +25,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from itertools import cycle
 from pathlib import Path
 import subprocess
@@ -54,6 +56,7 @@ from get_market_data.Japan.sales_data.get_sales_data import (
     save_sales_results,
     save_lot_urls_file,
 )
+from operations.sales.japan_calendar import is_japan_working_day
 from config.manufacturer_config_JM import manufacturer_configs as _real_configs
 from config.config import browser_settings
 
@@ -69,7 +72,11 @@ else:
 
 
 def log(msg):
-    print(msg, flush=True)
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        safe_msg = str(msg).encode("ascii", errors="replace").decode("ascii")
+        print(safe_msg, flush=True)
 
 
 def year_range_from_age_limit(age_limit: int):
@@ -92,8 +99,13 @@ def _job_key(site_name: str, make: str, model: str) -> str:
 def load_progress(auction_date: str) -> dict:
     p = _progress_path(auction_date)
     if p.exists():
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            log(f"WARNING: Corrupted progress file ignored ({p}): {e}")
+        except Exception as e:
+            log(f"WARNING: Failed reading progress file ({p}): {e}")
     return {
         "date": auction_date,
         "started_at": datetime.now().isoformat(timespec="seconds"),
@@ -202,14 +214,23 @@ def build_job_list(auction_date: str, maker_filter: str = None):
 CONFIG_DIR = Path(_root) / "config"
 WORKING_DAYS_PATH = CONFIG_DIR / "working_days.json"
 
+
 def get_next_pending_date():
     if not WORKING_DAYS_PATH.exists():
         return None
     with open(WORKING_DAYS_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
     for day in data.get("days", []):
-        if day.get("status") == "pending":
-            return day["date"]
+        if day.get("status") != "pending":
+            continue
+        d = day.get("date")
+        if not d:
+            continue
+        target = datetime.strptime(d, "%Y-%m-%d").date()
+        is_workday, reason = is_japan_working_day(target)
+        if is_workday:
+            return d
+        log(f"Skipping non-working pending date {d}: {reason}")
     return None
 
 def mark_date_completed(auction_date: str):
@@ -345,7 +366,7 @@ async def main():
     parser.add_argument("--limit", type=int, default=0, help="Max jobs to run (0 = all)")
     parser.add_argument("--delay", type=float, default=3.0, help="Seconds between jobs (default 3)")
     parser.add_argument("--resume", action="store_true", help="Resume a previously interrupted run for the same date")
-    parser.add_argument("--scheduled", action="store_true", help="Extract (today - 2 days); for 1 AM daily run (results available D+2)")
+    parser.add_argument("--scheduled", action="store_true", help="Extract yesterday (JST); for 8 PM run, data ready before 9 AM market open")
     args = parser.parse_args()
 
     auction_date = args.date
@@ -353,12 +374,16 @@ async def main():
     scheduled_mode = args.scheduled
 
     if scheduled_mode:
-        target = date.today() - timedelta(days=1)
-        if target.weekday() >= 5:
-            log(f"Skipping: {target} is weekend (no auction).")
+        # Use JST so we can run earlier (e.g. 8 PM Europe = 4 AM JST, data ready before 9 AM market open)
+        JST = timezone(timedelta(hours=9))
+        now_jst = datetime.now(timezone.utc).astimezone(JST)
+        target = (now_jst.date() - timedelta(days=1))
+        is_workday, reason = is_japan_working_day(target)
+        if not is_workday:
+            log(f"Skipping: {target} is not a Japan working day ({reason}).")
             return
         auction_date = target.isoformat()
-        log(f"Scheduled run: extracting auction date {auction_date} (results available ~1 AM today)")
+        log(f"Scheduled run: extracting auction date {auction_date} (results available ~1 AM JST)")
 
     if not auction_date and auto_mode:
         auction_date = get_next_pending_date()
@@ -372,10 +397,20 @@ async def main():
         log(f"Using default date (today): {auction_date}")
 
     try:
-        datetime.strptime(auction_date, "%Y-%m-%d")
+        target_date = datetime.strptime(auction_date, "%Y-%m-%d").date()
     except ValueError:
         log(f"Invalid date: {auction_date}. Use YYYY-MM-DD.")
         return
+
+    is_workday, reason = is_japan_working_day(target_date)
+    if not is_workday:
+        # Allow explicit --date runs even on non-working days so operators can
+        # force extraction when auction sites still publish data.
+        if args.date:
+            log(f"Proceeding with explicit date {auction_date} despite non-working day ({reason}).")
+        else:
+            log(f"Skipping: {auction_date} is not a Japan working day ({reason}).")
+            return
 
     active_sites = {k: v for k, v in auction_sites.items()}
     if args.site:

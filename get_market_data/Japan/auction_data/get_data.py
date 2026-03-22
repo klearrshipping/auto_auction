@@ -449,6 +449,14 @@ class SearchOptimizer(EnhancedSearchOptimizer):
                         # Extract listings for this specific model
                         listings = await self._extract_listings_fast(page, site_name, make, model)
                         
+                        # Enforce age limit: filter out vehicles older than min_year
+                        # (auction site form may not reliably apply year1)
+                        if listings and min_year is not None:
+                            before = len(listings)
+                            listings = [l for l in listings if l.get("year") and l["year"] >= min_year]
+                            if before > len(listings):
+                                self.logger.info(f"Filtered {before - len(listings)} vehicles older than {min_year} for {make} {model}")
+                        
                         if listings:
                             all_listings.extend(listings)
                         
@@ -1300,6 +1308,7 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
         self.direct_db = _NoDbPlaceholder()
         self.search_optimizer = SearchOptimizer()
         self.logger = setup_listing_logging()
+        self.models_with_listings: List[tuple] = []  # (make, model, site, count) for summary
         
     async def _process_single_site(self, site_name: str, searches: List[Dict]) -> int:
         """Process site with truly direct database operations"""
@@ -1332,6 +1341,8 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
                     if listings:
                         count = await self.direct_db.bulk_upsert_vehicles_truly_direct(listings)
                         total_listings += count
+                        model_name = search['models'][0] if search.get('models') else "?"
+                        self.models_with_listings.append((search['make'], model_name, site_name, count))
                         if getattr(self, 'output_file', None) and not self.dry_run:
                             root_path = Path(self.output_file)
                             p = save_auction_listings_uid(
@@ -1340,11 +1351,12 @@ class TrulyOptimizedSiteProcessor(SimplifiedSiteProcessor):
                             if p:
                                 print(f"  -> Saved to {p.name}", flush=True)
                         if self.dry_run:
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> DRY-RUN ({count} unique)", flush=True)
+                            print(f"{search['make']} {model_name} ({site_name}): {len(listings)} found -> DRY-RUN ({count} unique)", flush=True)
                         else:
-                            print(f"{search['make']} ({site_name}): {len(listings)} found -> {count} extracted", flush=True)
+                            print(f"{search['make']} {model_name} ({site_name}): {len(listings)} found -> {count} extracted", flush=True)
                     else:
-                        print(f"{search['make']} ({site_name}): 0 found -> 0 saved", flush=True)
+                        model_name = search['models'][0] if search.get('models') else "?"
+                        print(f"{search['make']} {model_name} ({site_name}): 0 found -> 0 saved", flush=True)
                         
                 except Exception as e:
                     self.logger.error(f"Error processing {search['make']} on {site_name}: {e}")
@@ -1532,6 +1544,21 @@ async def truly_optimized_main(dry_run=False, site_filter=None, maker_filter=Non
         print(f"Processing time: {duration/60:.1f} minutes")
         print(f"Speed: {rate:.1f} vehicles/minute")
         print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Summary of models with listings (for comparison with other sources)
+        models_found = getattr(processor, 'models_with_listings', [])
+        if models_found:
+            by_make_model = defaultdict(lambda: {"sites": [], "total": 0})
+            for make, model, site, count in models_found:
+                key = f"{make} {model}"
+                by_make_model[key]["sites"].append(f"{site}({count})")
+                by_make_model[key]["total"] += count
+            print(f"\n--- MODELS AVAILABLE (compare with other sources) ---")
+            for key in sorted(by_make_model.keys()):
+                info = by_make_model[key]
+                sites_str = ", ".join(info["sites"])
+                print(f"  {key}: {info['total']} total | {sites_str}")
+            print(f"--- {len(by_make_model)} make/model combinations had listings ---")
         
     except Exception as e:
         tb = traceback.format_exception(type(e), e, e.__traceback__)

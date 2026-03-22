@@ -17,13 +17,49 @@ import argparse
 import json
 import re
 import sys
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 _script_dir = Path(__file__).resolve().parent
+
+JST = timezone(timedelta(hours=9))
+AUCTION_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _is_auction_at_least_24h_ahead(auction_time_str) -> bool:
+    """True if auction_time is at least 24 hours ahead of now (JST)."""
+    if not auction_time_str or not isinstance(auction_time_str, str):
+        return True
+    s = str(auction_time_str).strip()
+    if not s or len(s) < 10:
+        return True
+    try:
+        dt = datetime.strptime(s[:19], AUCTION_TIME_FMT).replace(tzinfo=JST)
+        now = datetime.now(timezone.utc).astimezone(JST)
+        return dt >= now + timedelta(hours=24)
+    except ValueError:
+        return True
 _root = _script_dir.parent.parent.parent
 sys.path.insert(0, str(_root))
 
+try:
+    from config.manufacturer_config_JM import manufacturer_configs
+except ImportError:
+    manufacturer_configs = {}
+
 AUCTION_DATA_ROOT = _root / "data" / "auction_data"
+
+
+def _min_year_for_vehicle(make: str, model: str) -> int:
+    """Minimum year allowed (Jamaica age limit). Default 6 years."""
+    try:
+        if make and model and make in manufacturer_configs and model in manufacturer_configs[make]:
+            age_limit = manufacturer_configs[make][model].get("age_limit", 6)
+        else:
+            age_limit = 6
+        return date.today().year - age_limit
+    except Exception:
+        return date.today().year - 6
 
 OLD_DATE_RE = re.compile(r"_\d{4}-\d{2}-\d{2}\.json$")
 
@@ -99,14 +135,28 @@ def process_file(state_path: Path) -> bool:
         if isinstance(entry, dict) and entry.get("status") == "completed"
     ]
 
-    if not completed:
-        print(f"  Skipping: no completed entries")
-        return False
-
     site_name = state.get("site_name") or ""
-    compiled = [compile_record_from_state_entry(e, site_name) for e in completed]
+    compiled = []
+    for e in completed:
+        rec = compile_record_from_state_entry(e, site_name)
+        auction_time = rec.get("auction_time")
+        if not _is_auction_at_least_24h_ahead(auction_time):
+            continue
+        # Enforce age limit: exclude vehicles older than Jamaica import rules allow
+        year_val = rec.get("year")
+        if year_val is not None:
+            min_year = _min_year_for_vehicle(rec.get("make") or "", rec.get("model") or "")
+            if year_val < min_year:
+                continue
+        compiled.append(rec)
 
     out_path = state_path.parent / f"{state_path.stem}_compiled.json"
+    if not compiled:
+        print(f"  No entries with auction >= 24h ahead; writing empty compiled file")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+        return True
+
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(compiled, f, ensure_ascii=False, indent=2)
     print(f"  Saved {len(compiled)} records to {out_path.name}")

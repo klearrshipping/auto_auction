@@ -7,3 +7,4 @@ data/
 .venv/
 logs/
 debug.log
+production_log.txt

@@ -74,7 +74,7 @@ def main():
 
     if args.step is None or args.step == 2:
         log("--- Step 2: Listings ---")
-        cmd = [py, "-u", str(pipeline / "2_extract_listings.py")]
+        cmd = [py, "-u", str(pipeline / "extract_auction_listings.py")]
         if args.limit > 0:
             cmd.extend(["--limit", str(args.limit)])
         rc = run(cmd)

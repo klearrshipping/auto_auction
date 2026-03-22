@@ -5,11 +5,16 @@ Test script to download auction images.
 Flow:
   1. Scan dataset: find *_compiled.json files, extract records with image_urls
   2. Build batch job: list of (url, dest_path) for each image
-  3. Launch browser (visible)
-  4. For each URL in sequence: load URL, wait for image to load, save to folder
+  3. Download: either via requests (with Referer) or browser (with login)
+
+p3.aleado.com blocks direct requests without a Referer header (hotlink protection).
+Use --requests to try fast requests first; use browser mode if session cookies
+are required for your auction site.
 
 Usage:
   python tools/test_download_images.py [--limit N]
+  python tools/test_download_images.py --requests --limit 5   # Try Referer-based fetch first
+  python tools/test_download_images.py --referer https://auc.japancarauc.com/
 
 Run from project root.
 """
@@ -76,6 +81,40 @@ def scan_dataset(limit: int = 0) -> list[tuple[str, Path]]:
     return batch
 
 
+def download_batch_requests(
+    batch: list[tuple[str, Path]],
+    referer: str | None = None,
+    try_all_referers: bool = False,
+) -> int:
+    """
+    Download images via requests with Referer header.
+    Works when p3.aleado.com only checks Referer (no session cookies needed).
+    """
+    from tools.aleado_image_fetch import requests_fetch, try_fetch_with_referers
+
+    success = 0
+    for idx, (url, dest) in enumerate(batch):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[{idx + 1}/{len(batch)}] {url[:70]}...", end=" ", flush=True)
+        if try_all_referers:
+            body, used = try_fetch_with_referers(url)
+            if body:
+                dest.write_bytes(body)
+                success += 1
+                print(f"OK (referer: {used})")
+            else:
+                print("FAIL (no referer worked)")
+        else:
+            body, status, err = requests_fetch(url, referer=referer)
+            if body:
+                dest.write_bytes(body)
+                success += 1
+                print(f"OK")
+            else:
+                print(f"FAIL: {err or status}")
+    return success
+
+
 async def login_zen_autoworks(page, auction_sites: dict) -> bool:
     """Log in to Zen Autoworks so image requests have session cookies."""
     site_name = "Zen Autoworks"
@@ -103,7 +142,12 @@ async def login_zen_autoworks(page, auction_sites: dict) -> bool:
         return False
 
 
-async def run_batch(batch: list[tuple[str, Path]], headless: bool = False, login: bool = True):
+async def run_batch(
+    batch: list[tuple[str, Path]],
+    headless: bool = False,
+    login: bool = True,
+    referer: str = "https://auction.zenautoworks.ca/",
+):
     """Launch browser, optionally log in, load each URL in sequence, wait for image, save."""
     from playwright.async_api import async_playwright
     from get_market_data.Japan.auction_site_config_JP import auction_sites
@@ -113,7 +157,8 @@ async def run_batch(batch: list[tuple[str, Path]], headless: bool = False, login
         return 0
 
     print(f"Batch: {len(batch)} image(s)")
-    print(f"Browser: {'headless' if headless else 'visible'}\n")
+    print(f"Browser: {'headless' if headless else 'visible'}")
+    print(f"Referer: {referer}\n")
 
     async with async_playwright() as p:
         # Use system Chrome (same as desktop) so images load like in your browser
@@ -122,7 +167,7 @@ async def run_batch(batch: list[tuple[str, Path]], headless: bool = False, login
         except Exception:
             browser = await p.chromium.launch(headless=headless)
         # Referer from auction site may be required for p3.aleado.com images
-        extra_headers = {"Referer": "https://auction.zenautoworks.ca/"}
+        extra_headers = {"Referer": referer.rstrip("/") + "/"}
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -164,6 +209,22 @@ def main():
     parser.add_argument("--limit", type=int, default=1, help="Max compiled files to scan (0=all)")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-login", action="store_true", help="Skip Zen Autoworks login (images may 404)")
+    parser.add_argument(
+        "--requests",
+        action="store_true",
+        help="Use requests with Referer (fast, no browser). Try this first; use browser if it fails.",
+    )
+    parser.add_argument(
+        "--referer",
+        type=str,
+        default="https://auction.zenautoworks.ca/",
+        help="Referer header for p3.aleado.com (e.g. https://auc.japancarauc.com/)",
+    )
+    parser.add_argument(
+        "--try-all-referers",
+        action="store_true",
+        help="With --requests: try each known auction site referer until one works",
+    )
     args = parser.parse_args()
 
     print("Step 1: Scanning dataset for files with image URLs...")
@@ -175,12 +236,30 @@ def main():
         return 1
 
     print("Step 2: Batch job built\n")
-    print("Step 3: Launching browser...")
-    print("Step 4: Loading URLs in sequence, waiting for image, saving...\n")
 
-    success = asyncio.run(run_batch(batch, headless=args.headless, login=not args.no_login))
+    if args.requests:
+        print("Step 3: Downloading via requests (Referer header)...\n")
+        success = download_batch_requests(
+            batch,
+            referer=args.referer,
+            try_all_referers=args.try_all_referers,
+        )
+    else:
+        print("Step 3: Launching browser...")
+        print("Step 4: Loading URLs in sequence, waiting for image, saving...\n")
+        success = asyncio.run(
+            run_batch(
+                batch,
+                headless=args.headless,
+                login=not args.no_login,
+                referer=args.referer,
+            )
+        )
 
     print(f"\nDone: {success}/{len(batch)} images saved")
+    if args.requests and success < len(batch):
+        print("\nTip: If requests failed, try browser mode (omit --requests) with --no-login first,")
+        print("  or use full browser + login for session-protected images.")
     return 0 if success == len(batch) else 1
 
 

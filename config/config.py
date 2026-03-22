@@ -3,7 +3,12 @@
 Runtime Configuration for Auction Data Collection System
 """
 
+import os
 import logging
+
+# GCP Secret Manager project for auction site credentials
+# Override with env: GCP_SECRETS_PROJECT
+GCP_SECRETS_PROJECT = os.environ.get("GCP_SECRETS_PROJECT", "email-automation-490620")
 
 # Logging configuration (used by get_market_data.Japan.auction_data.get_data)
 logging_config = {
@@ -26,7 +31,7 @@ browser_settings = {
 # Runtime settings
 runtime_settings = {
     # Sales data: max concurrent lot-detail page fetches (get_sales_details)
-    "concurrent_lot_details": 2,
+    "concurrent_lot_details": 6,
     # Seconds to wait between each batch of concurrent requests
     "detail_batch_delay": 3,
     # Abort if this many consecutive lots return no meaningful data
@@ -40,4 +45,5 @@ __all__ = [
     "logging_config",
     "browser_settings",
     "runtime_settings",
+    "GCP_SECRETS_PROJECT",
 ]
